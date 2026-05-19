@@ -1,0 +1,5 @@
+/build
+/.qtcreator
+/vendor/windivert
+/src/platform/linux
+/src/platform/mac

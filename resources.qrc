@@ -1,0 +1,7 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/icons">
+    <file alias="active.png">resources/icons/active.png</file>
+    <file alias="inactive.png">resources/icons/inactive.png</file>
+    <file alias="app.ico">resources/icons/app.ico</file>
+</qresource>
+</RCC>
