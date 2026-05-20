@@ -1,5 +1,5 @@
 #pragma once
-#include "Profile.h"
+
 #include "platform/IPlatformBackend.h"
 #include <QObject>
 #include <QList>

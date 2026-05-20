@@ -24,14 +24,19 @@
 #include <QMutex>
 #include "platform/IPlatformBackend.h"
 
+
 struct DnsState {
-    quint32 origDstIp   = 0;
-    quint16 origDstPort = 0;
+    bool    isIPv6       = false;
+    quint32 origDstIp4   = 0;          // IPv4
+    uint8_t origDstIp6[16] = {};       // IPv6
+    quint16 origDstPort  = 0;
 };
 
 class WinDivertWorker;
 
+// ---------------------------------------------------------------------------
 // WinDivertBackend
+// ---------------------------------------------------------------------------
 class WinDivertBackend : public IPlatformBackend {
     Q_OBJECT
 public:
@@ -52,7 +57,9 @@ private:
     std::atomic<bool> m_running    { false };
 };
 
+// ---------------------------------------------------------------------------
 // WinDivertWorker
+// ---------------------------------------------------------------------------
 class WinDivertWorker : public QObject {
     Q_OBJECT
 public:
@@ -92,12 +99,12 @@ private:
 
     bool redirectDnsOutbound(
         HANDLE h, uint8_t* packet, uint32_t packetLen, WINDIVERT_ADDRESS* addr,
-        WINDIVERT_IPHDR* ip4, WINDIVERT_UDPHDR* udp);
+        WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6, WINDIVERT_UDPHDR* udp);
 
     bool rewriteDnsInbound(
         HANDLE h, uint8_t* packet, uint32_t packetLen, WINDIVERT_ADDRESS* addr,
-        WINDIVERT_IPHDR* ip4, WINDIVERT_UDPHDR* udp,
-        quint32 origSrcIp, quint16 origSrcPort);
+        WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6, WINDIVERT_UDPHDR* udp,
+        const DnsState& st);
 
     BypassConfig        m_config;
     std::atomic<bool>   m_stopRequested { false };

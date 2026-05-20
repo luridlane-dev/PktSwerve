@@ -12,7 +12,6 @@
 WinDivertBackend::WinDivertBackend(QObject* parent) : IPlatformBackend(parent)
 {
     LOG_INFO0("WinDivertBackend created");
-
 }
 
 WinDivertBackend::~WinDivertBackend()
@@ -98,7 +97,6 @@ bool WinDivertBackend::start(const BypassConfig& config)
     return true;
 }
 
-// ---------------------------------------------------------------------------
 bool WinDivertBackend::stop()
 {
     if (!m_running) {
@@ -151,9 +149,25 @@ void WinDivertWorker::closeHandle()
     }
 }
 
+static inline uint32_t makeFlowId(WINDIVERT_IPHDR*   ip4,
+                                  WINDIVERT_IPV6HDR* ip6,
+                                  WINDIVERT_TCPHDR*  tcp)
+{
+    uint32_t sp = static_cast<uint32_t>(ntohs(tcp->SrcPort));
+    uint32_t dp = static_cast<uint32_t>(ntohs(tcp->DstPort));
+    if (ip4) {
+        return ip4->SrcAddr ^ ip4->DstAddr ^ (sp << 16) ^ dp;
+    } else {
+        const uint32_t* s6 = reinterpret_cast<const uint32_t*>(ip6->SrcAddr);
+        const uint32_t* d6 = reinterpret_cast<const uint32_t*>(ip6->DstAddr);
+        return s6[3] ^ d6[3] ^ (sp << 16) ^ dp;
+    }
+}
+
 void WinDivertWorker::run()
 {
-    QString filterStr =
+    // TCP: HTTP (80) & HTTPS/TLS ClientHello (443) - IPv4
+    QString tcpV4 =
         "(outbound and tcp and tcp.PayloadLength > 0 and tcp.PayloadLength < 16384"
         " and (tcp.DstPort == 80"
         "  or (tcp.DstPort == 443"
@@ -161,11 +175,27 @@ void WinDivertWorker::run()
         "   and tcp.Payload[1] == 0x03"
         "   and tcp.Payload[2] <= 0x03)))";
 
-    filterStr += " or (outbound and udp and udp.DstPort == 443)";
+    // TCP: HTTP (80) & HTTPS/TLS ClientHello (443) - IPv6
+    QString tcpV6 =
+        "(outbound and ipv6 and tcp and tcp.PayloadLength > 0 and tcp.PayloadLength < 16384"
+        " and (tcp.DstPort == 80"
+        "  or (tcp.DstPort == 443"
+        "   and tcp.Payload[0] == 0x16"
+        "   and tcp.Payload[1] == 0x03"
+        "   and tcp.Payload[2] <= 0x03)))";
 
+    QString filterStr = tcpV4 + " or " + tcpV6;
+
+    filterStr += " or (outbound and udp and udp.DstPort == 443)";
+    filterStr += " or (outbound and ipv6 and udp and udp.DstPort == 443)";
+
+    // DNS redirect - IPv4 + IPv6
     if (m_config.dnsRedirect) {
         filterStr += " or (outbound and udp and udp.DstPort == 53)";
+        filterStr += " or (outbound and ipv6 and udp and udp.DstPort == 53)";
         filterStr += QString(" or (inbound and udp and udp.SrcPort == %1)")
+                         .arg(m_config.dnsPort);
+        filterStr += QString(" or (inbound and ipv6 and udp and udp.SrcPort == %1)")
                          .arg(m_config.dnsPort);
     }
 
@@ -219,12 +249,12 @@ void WinDivertWorker::run()
             continue;
         }
 
-        uint8_t* packet  = buf.data();
-        WINDIVERT_IPHDR* ip4     = nullptr;
+        uint8_t*           packet  = buf.data();
+        WINDIVERT_IPHDR*   ip4     = nullptr;
         WINDIVERT_IPV6HDR* ip6     = nullptr;
-        WINDIVERT_TCPHDR* tcp     = nullptr;
-        WINDIVERT_UDPHDR* udp     = nullptr;
-        uint8_t* payload = nullptr;
+        WINDIVERT_TCPHDR*  tcp     = nullptr;
+        WINDIVERT_UDPHDR*  udp     = nullptr;
+        uint8_t*           payload = nullptr;
         uint32_t           pLen    = 0;
 
         WinDivertHelperParsePacket(
@@ -255,63 +285,68 @@ void WinDivertWorker::run()
                                    memcmp(payload, "CONN",  4) == 0));
 
             if (isTLSHello && m_config.fragmentHttpsPersist) {
-                uint32_t flowId = (static_cast<uint32_t>(ntohs(tcp->SrcPort)) << 16)
-                | static_cast<uint32_t>(ntohs(tcp->DstPort));
+                uint32_t flowId = makeFlowId(ip4, ip6, tcp);
 
-                QString sni;
+                QString    sni;
                 QByteArray assembled;
 
                 QString quickSni = extractSNI(payload, pLen);
                 if (!quickSni.isEmpty()) {
-                    sni            = quickSni;
-                    assembled      = QByteArray(reinterpret_cast<const char*>(payload), static_cast<int>(pLen));
+                    sni       = quickSni;
+                    assembled = QByteArray(reinterpret_cast<const char*>(payload),
+                                           static_cast<int>(pLen));
                     tlsFlows.remove(flowId);
-                    LOG_INFO("TLS ClientHello complete (single pkt) | SNI=%1 | pLen=%2", sni, pLen);
+                    LOG_INFO("TLS ClientHello complete (single pkt) | SNI=%1 | pLen=%2 | ipv6=%3",
+                             sni, pLen, ip6 ? "yes" : "no");
                 } else {
-                    // Buffer fragmented handshake packets
                     TlsFlowBuffer& flow = tlsFlows[flowId];
                     flow.lastUpdate = GetTickCount64();
-
-                    // Store the raw packet for precise replay
-                    flow.rawPackets.append(QByteArray(reinterpret_cast<const char*>(packet), packetLen));
+                    flow.rawPackets.append(
+                        QByteArray(reinterpret_cast<const char*>(packet), packetLen));
 
                     bool readyToProcess = accumulateTlsFragment(flow, payload, pLen, assembled);
 
                     if (readyToProcess) {
-                        sni = extractSNI(reinterpret_cast<const uint8_t*>(assembled.constData()),
-                                         static_cast<uint32_t>(assembled.size()));
+                        sni = extractSNI(
+                            reinterpret_cast<const uint8_t*>(assembled.constData()),
+                            static_cast<uint32_t>(assembled.size()));
 
                         bool bypass = sni.isEmpty() ? true : shouldBypass(sni, m_config);
-                        LOG_INFO("TLS ClientHello reassembled | SNI=%1 | totalLen=%2",
-                                 sni.isEmpty() ? "(none)" : sni, assembled.size());
+                        LOG_INFO("TLS ClientHello reassembled | SNI=%1 | totalLen=%2 | ipv6=%3",
+                                 sni.isEmpty() ? "(none)" : sni, assembled.size(),
+                                 ip6 ? "yes" : "no");
 
-                        // Process buffered packets sequentially
                         for (int i = 0; i < flow.rawPackets.size(); ++i) {
-                            QByteArray& rawPkt = flow.rawPackets[i];
-                            uint8_t* rpData = reinterpret_cast<uint8_t*>(rawPkt.data());
-                            uint32_t rpLen  = static_cast<uint32_t>(rawPkt.size());
+                            QByteArray& rawPkt  = flow.rawPackets[i];
+                            uint8_t*    rpData  = reinterpret_cast<uint8_t*>(rawPkt.data());
+                            uint32_t    rpLen   = static_cast<uint32_t>(rawPkt.size());
 
-                            WINDIVERT_IPHDR* rIp4 = nullptr;
-                            WINDIVERT_IPV6HDR* rIp6 = nullptr;
-                            WINDIVERT_TCPHDR* rTcp = nullptr;
-                            uint8_t* rPayload = nullptr;
-                            uint32_t rPLen = 0;
+                            WINDIVERT_IPHDR*   rIp4     = nullptr;
+                            WINDIVERT_IPV6HDR* rIp6     = nullptr;
+                            WINDIVERT_TCPHDR*  rTcp     = nullptr;
+                            uint8_t*           rPayload = nullptr;
+                            uint32_t           rPLen    = 0;
 
-                            WinDivertHelperParsePacket(rpData, rpLen, &rIp4, &rIp6, nullptr, nullptr, nullptr,
-                                                       &rTcp, nullptr, reinterpret_cast<void**>(&rPayload), &rPLen, nullptr, nullptr);
+                            WinDivertHelperParsePacket(
+                                rpData, rpLen,
+                                &rIp4, &rIp6, nullptr, nullptr, nullptr,
+                                &rTcp, nullptr,
+                                reinterpret_cast<void**>(&rPayload), &rPLen,
+                                nullptr, nullptr);
 
                             if (bypass && i == 0) {
-                                // Apply bypass techniques ONLY to the first segment
                                 ++bypassCount;
-                                if (m_config.fakePackets) sendFakePacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
-                                if (m_config.wrongChecksum) sendWrongChecksumPacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
-                                if (m_config.wrongSeq) sendWrongSeqPacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
+                                if (m_config.fakePackets)
+                                    sendFakePacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
+                                if (m_config.wrongChecksum)
+                                    sendWrongChecksumPacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
+                                if (m_config.wrongSeq)
+                                    sendWrongSeqPacket(m_handle, rpData, rpLen, &addr, rIp4, rIp6, rTcp);
 
                                 fragmentPacket(m_handle, rpData, &addr, rIp4, rIp6, rTcp,
                                                rPayload, rPLen,
                                                m_config.httpsFragmentSize, m_config.reverseFrag);
                             } else {
-                                // Forward subsequent fragments natively
                                 WinDivertHelperCalcChecksums(rpData, rpLen, &addr, 0);
                                 WinDivertSend(m_handle, rpData, rpLen, nullptr, &addr);
                             }
@@ -319,8 +354,6 @@ void WinDivertWorker::run()
                         tlsFlows.remove(flowId);
                         goto next_packet;
                     } else {
-                        // Do not send the partial packet.
-                        // Let it buffer. Sending it now would expose the unfragmented stream.
                         goto next_packet;
                     }
                 }
@@ -329,11 +362,12 @@ void WinDivertWorker::run()
                     quint64 now = GetTickCount64();
                     for (auto it = tlsFlows.begin(); it != tlsFlows.end(); ) {
                         if (now - it.value().lastUpdate > 5000) {
-                            // Flush stuck packets to prevent application hangs
                             for (QByteArray& rawPkt : it.value().rawPackets) {
                                 uint8_t* rpData = reinterpret_cast<uint8_t*>(rawPkt.data());
-                                WinDivertHelperCalcChecksums(rpData, static_cast<uint32_t>(rawPkt.size()), &addr, 0);
-                                WinDivertSend(m_handle, rpData, static_cast<uint32_t>(rawPkt.size()), nullptr, &addr);
+                                WinDivertHelperCalcChecksums(
+                                    rpData, static_cast<uint32_t>(rawPkt.size()), &addr, 0);
+                                WinDivertSend(m_handle, rpData,
+                                              static_cast<uint32_t>(rawPkt.size()), nullptr, &addr);
                             }
                             it = tlsFlows.erase(it);
                         } else {
@@ -347,8 +381,9 @@ void WinDivertWorker::run()
                     if (bypass) {
                         ++bypassCount;
 
-                        const uint8_t* workPayload = reinterpret_cast<const uint8_t*>(assembled.constData());
-                        uint32_t       workPLen    = static_cast<uint32_t>(assembled.size());
+                        const uint8_t* workPayload =
+                            reinterpret_cast<const uint8_t*>(assembled.constData());
+                        uint32_t workPLen = static_cast<uint32_t>(assembled.size());
 
                         uint32_t ipHdrLen  = ip4 ? (ip4->HdrLength * 4u) : 40u;
                         uint32_t tcpHdrLen = tcp->HdrLength * 4u;
@@ -360,29 +395,29 @@ void WinDivertWorker::run()
                             memcpy(m_modBuf.data() + hdrLen, workPayload, workPLen);
 
                             if (ip4)
-                                reinterpret_cast<WINDIVERT_IPHDR*>(m_modBuf.data())->Length = htons(static_cast<uint16_t>(newPktLen));
+                                reinterpret_cast<WINDIVERT_IPHDR*>(m_modBuf.data())->Length =
+                                    htons(static_cast<uint16_t>(newPktLen));
                             else if (ip6)
-                                reinterpret_cast<WINDIVERT_IPV6HDR*>(m_modBuf.data())->Length = htons(static_cast<uint16_t>(newPktLen - 40));
+                                reinterpret_cast<WINDIVERT_IPV6HDR*>(m_modBuf.data())->Length =
+                                    htons(static_cast<uint16_t>(newPktLen - 40));
 
-                            uint8_t* np   = m_modBuf.data();
-                            WINDIVERT_IPHDR* nIp4 = ip4 ? reinterpret_cast<WINDIVERT_IPHDR*>(np) : nullptr;
-                            WINDIVERT_IPV6HDR*nIp6 = ip6 ? reinterpret_cast<WINDIVERT_IPV6HDR*>(np) : nullptr;
-                            WINDIVERT_TCPHDR* nTcp = reinterpret_cast<WINDIVERT_TCPHDR*>(np + ipHdrLen);
-                            uint8_t* nPld = np + hdrLen;
+                            uint8_t*           np   = m_modBuf.data();
+                            WINDIVERT_IPHDR*   nIp4 = ip4 ? reinterpret_cast<WINDIVERT_IPHDR*>(np)   : nullptr;
+                            WINDIVERT_IPV6HDR* nIp6 = ip6 ? reinterpret_cast<WINDIVERT_IPV6HDR*>(np) : nullptr;
+                            WINDIVERT_TCPHDR*  nTcp = reinterpret_cast<WINDIVERT_TCPHDR*>(np + ipHdrLen);
+                            uint8_t*           nPld = np + hdrLen;
 
-                            if (m_config.fakePackets) {
+                            if (m_config.fakePackets)
                                 sendFakePacket(m_handle, np, newPktLen, &addr, nIp4, nIp6, nTcp);
-                            }
-                            if (m_config.wrongChecksum) {
+                            if (m_config.wrongChecksum)
                                 sendWrongChecksumPacket(m_handle, np, newPktLen, &addr, nIp4, nIp6, nTcp);
-                            }
-                            if (m_config.wrongSeq) {
+                            if (m_config.wrongSeq)
                                 sendWrongSeqPacket(m_handle, np, newPktLen, &addr, nIp4, nIp6, nTcp);
-                            }
 
                             modified = fragmentPacket(m_handle, np, &addr, nIp4, nIp6, nTcp,
                                                       nPld, workPLen,
-                                                      m_config.httpsFragmentSize, m_config.reverseFrag);
+                                                      m_config.httpsFragmentSize,
+                                                      m_config.reverseFrag);
                         }
                     }
                 }
@@ -391,8 +426,9 @@ void WinDivertWorker::run()
                 QString host   = extractHttpHost(payload, pLen);
                 bool    bypass = shouldBypass(host, m_config);
 
-                LOG_INFO("HTTP request | Host=%1 | bypass=%2 | pLen=%3",
-                         host.isEmpty() ? "(none)" : host, bypass ? "yes" : "no", pLen);
+                LOG_INFO("HTTP request | Host=%1 | bypass=%2 | pLen=%3 | ipv6=%4",
+                         host.isEmpty() ? "(none)" : host,
+                         bypass ? "yes" : "no", pLen, ip6 ? "yes" : "no");
 
                 if (bypass) {
                     ++bypassCount;
@@ -410,18 +446,26 @@ void WinDivertWorker::run()
                 }
             }
 
+            // -------------------------------------------------------------------
+            // UDP - DNS redirect (IPv4 + IPv6)
+            // -------------------------------------------------------------------
         } else if (udp && m_config.dnsRedirect) {
 
             if (addr.Outbound) {
                 QString queryDomain = extractDnsQuery(payload, pLen);
                 bool    bypass      = shouldBypass(queryDomain, m_config);
 
-                if (bypass && ip4) {
+                if (bypass && (ip4 || ip6)) {
                     quint16 clientPort = ntohs(udp->SrcPort);
-                    quint32 origDstIp  = ntohl(ip4->DstAddr);
 
                     DnsState st;
-                    st.origDstIp   = origDstIp;
+                    if (ip4) {
+                        st.isIPv6    = false;
+                        st.origDstIp4 = ntohl(ip4->DstAddr);
+                    } else {
+                        st.isIPv6 = true;
+                        memcpy(st.origDstIp6, ip6->DstAddr, 16);
+                    }
                     st.origDstPort = ntohs(udp->DstPort);
 
                     {
@@ -429,16 +473,18 @@ void WinDivertWorker::run()
                         m_dnsState[clientPort] = st;
                     }
 
-                    LOG_DEBUG("DNS outbound | domain=%1 | redirecting to %2:%3",
-                              queryDomain, m_config.dnsServer, m_config.dnsPort);
-                    modified = redirectDnsOutbound(m_handle, packet, packetLen, &addr, ip4, udp);
+                    LOG_DEBUG("DNS outbound | domain=%1 | redirecting to %2:%3 | ipv6=%4",
+                              queryDomain, m_config.dnsServer, m_config.dnsPort,
+                              ip6 ? "yes" : "no");
+                    modified = redirectDnsOutbound(
+                        m_handle, packet, packetLen, &addr, ip4, ip6, udp);
                     if (modified) ++dnsCount;
                 }
 
             } else {
-                quint16 clientPort = ntohs(udp->DstPort);
+                quint16  clientPort = ntohs(udp->DstPort);
                 DnsState st;
-                bool found = false;
+                bool     found      = false;
                 {
                     QMutexLocker lock(&m_dnsMutex);
                     if (m_dnsState.contains(clientPort)) {
@@ -447,9 +493,8 @@ void WinDivertWorker::run()
                     }
                 }
                 if (found) {
-                    modified = rewriteDnsInbound(m_handle, packet, packetLen,
-                                                 &addr, ip4, udp,
-                                                 st.origDstIp, st.origDstPort);
+                    modified = rewriteDnsInbound(
+                        m_handle, packet, packetLen, &addr, ip4, ip6, udp, st);
                 }
             }
         }
@@ -507,9 +552,11 @@ bool WinDivertWorker::fragmentPacket(
     memcpy(m_fragBuf1.data(), packet, headerLen);
     memcpy(m_fragBuf1.data() + headerLen, payload, fragSize);
     if (ip4)
-        reinterpret_cast<WINDIVERT_IPHDR*>(m_fragBuf1.data())->Length = htons(static_cast<uint16_t>(f1Len));
+        reinterpret_cast<WINDIVERT_IPHDR*>(m_fragBuf1.data())->Length =
+            htons(static_cast<uint16_t>(f1Len));
     else
-        reinterpret_cast<WINDIVERT_IPV6HDR*>(m_fragBuf1.data())->Length = htons(static_cast<uint16_t>(f1Len - 40));
+        reinterpret_cast<WINDIVERT_IPV6HDR*>(m_fragBuf1.data())->Length =
+            htons(static_cast<uint16_t>(f1Len - 40));
 
     memcpy(m_fragBuf2.data(), packet, headerLen);
     memcpy(m_fragBuf2.data() + headerLen, payload + fragSize, remaining);
@@ -517,9 +564,11 @@ bool WinDivertWorker::fragmentPacket(
         htonl(ntohl(tcp->SeqNum) + static_cast<uint32_t>(fragSize));
 
     if (ip4)
-        reinterpret_cast<WINDIVERT_IPHDR*>(m_fragBuf2.data())->Length = htons(static_cast<uint16_t>(f2Len));
+        reinterpret_cast<WINDIVERT_IPHDR*>(m_fragBuf2.data())->Length =
+            htons(static_cast<uint16_t>(f2Len));
     else
-        reinterpret_cast<WINDIVERT_IPV6HDR*>(m_fragBuf2.data())->Length = htons(static_cast<uint16_t>(f2Len - 40));
+        reinterpret_cast<WINDIVERT_IPV6HDR*>(m_fragBuf2.data())->Length =
+            htons(static_cast<uint16_t>(f2Len - 40));
 
     WinDivertHelperCalcChecksums(m_fragBuf1.data(), f1Len, addr, 0);
     WinDivertHelperCalcChecksums(m_fragBuf2.data(), f2Len, addr, 0);
@@ -582,9 +631,11 @@ void WinDivertWorker::sendWrongChecksumPacket(
     reinterpret_cast<WINDIVERT_TCPHDR*>(localBuf.data() + ipHdrLen)->Checksum = 0xDEAD;
 
     if (ip4)
-        reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL = static_cast<uint8_t>(m_config.fakePacketTTL);
+        reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL =
+            static_cast<uint8_t>(m_config.fakePacketTTL);
     else if (ip6)
-        reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit = static_cast<uint8_t>(m_config.fakePacketTTL);
+        reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit =
+            static_cast<uint8_t>(m_config.fakePacketTTL);
 
     WinDivertSend(h, localBuf.data(), packetLen, nullptr, addr);
 }
@@ -604,36 +655,52 @@ void WinDivertWorker::sendWrongSeqPacket(
     fakeTcp->SeqNum = htonl(ntohl(tcp->SeqNum) ^ 0x0000C001);
 
     if (ip4)
-        reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL = static_cast<uint8_t>(m_config.fakePacketTTL);
+        reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL =
+            static_cast<uint8_t>(m_config.fakePacketTTL);
     else if (ip6)
-        reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit = static_cast<uint8_t>(m_config.fakePacketTTL);
+        reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit =
+            static_cast<uint8_t>(m_config.fakePacketTTL);
 
     WinDivertHelperCalcChecksums(localBuf.data(), packetLen, addr, 0);
     WinDivertSend(h, localBuf.data(), packetLen, nullptr, addr);
 }
 
+
 bool WinDivertWorker::redirectDnsOutbound(
     HANDLE h, uint8_t* packet, uint32_t packetLen, WINDIVERT_ADDRESS* addr,
-    WINDIVERT_IPHDR* ip4, WINDIVERT_UDPHDR* udp)
+    WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6, WINDIVERT_UDPHDR* udp)
 {
-    if (!packet || packetLen == 0 || !ip4) {
-        return false;
-    }
-
-    std::vector<uint8_t> pkt(packetLen);
-    memcpy(pkt.data(), packet, packetLen);
-
-    uint32_t ipHdrLen = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data())->HdrLength * 4u;
-    auto* newIp4 = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data());
-    auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + ipHdrLen);
+    if (!packet || packetLen == 0 || (!ip4 && !ip6)) return false;
 
     QHostAddress dnsAddr(m_config.dnsServer);
-    if (dnsAddr.isNull()) {
-        return false;
-    }
+    if (dnsAddr.isNull()) return false;
 
-    newIp4->DstAddr = htonl(dnsAddr.toIPv4Address());
-    newUdp->DstPort = htons(static_cast<uint16_t>(m_config.dnsPort));
+    std::vector<uint8_t> pkt(packet, packet + packetLen);
+
+    if (ip4) {
+        if (dnsAddr.protocol() != QAbstractSocket::IPv4Protocol) {
+            LOG_WARN0("DNS redirect: IPv4 packet but dnsServer is not IPv4 — skipping");
+            return false;
+        }
+        uint32_t ipHdrLen = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data())->HdrLength * 4u;
+        auto* newIp4 = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data());
+        auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + ipHdrLen);
+        newIp4->DstAddr = htonl(dnsAddr.toIPv4Address());
+        newUdp->DstPort = htons(static_cast<uint16_t>(m_config.dnsPort));
+    } else {
+        QHostAddress dnsAddr6 = (dnsAddr.protocol() == QAbstractSocket::IPv6Protocol)
+                                    ? dnsAddr
+                                    : QHostAddress(dnsAddr.toIPv6Address());
+        if (dnsAddr6.isNull()) {
+            LOG_WARN0("DNS redirect: IPv6 packet but dnsServer cannot be mapped to IPv6 — skipping");
+            return false;
+        }
+        auto* newIp6 = reinterpret_cast<WINDIVERT_IPV6HDR*>(pkt.data());
+        auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + 40u);
+        Q_IPV6ADDR a6 = dnsAddr6.toIPv6Address();
+        memcpy(newIp6->DstAddr, &a6, 16);
+        newUdp->DstPort = htons(static_cast<uint16_t>(m_config.dnsPort));
+    }
 
     WinDivertHelperCalcChecksums(pkt.data(), packetLen, addr, 0);
     WinDivertSend(h, pkt.data(), packetLen, nullptr, addr);
@@ -642,22 +709,27 @@ bool WinDivertWorker::redirectDnsOutbound(
 
 bool WinDivertWorker::rewriteDnsInbound(
     HANDLE h, uint8_t* packet, uint32_t packetLen, WINDIVERT_ADDRESS* addr,
-    WINDIVERT_IPHDR* ip4, WINDIVERT_UDPHDR* udp,
-    quint32 origSrcIp, quint16 origSrcPort)
+    WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6, WINDIVERT_UDPHDR* udp,
+    const DnsState& st)
 {
-    if (!packet || packetLen == 0 || !ip4) {
+    if (!packet || packetLen == 0 || (!ip4 && !ip6)) return false;
+
+    std::vector<uint8_t> pkt(packet, packet + packetLen);
+
+    if (ip4 && !st.isIPv6) {
+        uint32_t ipHdrLen = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data())->HdrLength * 4u;
+        auto* newIp4 = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data());
+        auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + ipHdrLen);
+        newIp4->SrcAddr = htonl(st.origDstIp4);
+        newUdp->SrcPort = htons(st.origDstPort);
+    } else if (ip6 && st.isIPv6) {
+        auto* newIp6 = reinterpret_cast<WINDIVERT_IPV6HDR*>(pkt.data());
+        auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + 40u);
+        memcpy(newIp6->SrcAddr, st.origDstIp6, 16);
+        newUdp->SrcPort = htons(st.origDstPort);
+    } else {
         return false;
     }
-
-    std::vector<uint8_t> pkt(packetLen);
-    memcpy(pkt.data(), packet, packetLen);
-
-    uint32_t ipHdrLen = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data())->HdrLength * 4u;
-    auto* newIp4 = reinterpret_cast<WINDIVERT_IPHDR*>(pkt.data());
-    auto* newUdp = reinterpret_cast<WINDIVERT_UDPHDR*>(pkt.data() + ipHdrLen);
-
-    newIp4->SrcAddr = htonl(origSrcIp);
-    newUdp->SrcPort = htons(origSrcPort);
 
     WinDivertHelperCalcChecksums(pkt.data(), packetLen, addr, 0);
     WinDivertSend(h, pkt.data(), packetLen, nullptr, addr);

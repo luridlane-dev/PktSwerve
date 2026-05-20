@@ -251,9 +251,9 @@ void BypassEngine::saveConfig()
 bool BypassEngine::autoStart() const
 {
 #ifdef PLATFORM_WINDOWS
-    QSettings s("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                QSettings::NativeFormat);
-    return s.contains("PktSwerve");
+    QString cmd = "schtasks /Query /TN \"PktSwerve\" >nul 2>&1";
+    int ret = system(cmd.toStdString().c_str());
+    return (ret == 0);
 #else
     return false;
 #endif
@@ -268,66 +268,24 @@ void BypassEngine::setAutoStart(bool enabled)
 void BypassEngine::setupAutoStart(bool enabled)
 {
 #ifdef PLATFORM_WINDOWS
-    QSettings s("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-                QSettings::NativeFormat);
-    if (enabled) {
-        QString exePath = QString("\"%1\"").arg(QCoreApplication::applicationFilePath());
-        s.setValue("PktSwerve", exePath);
-        LOG_INFO("AutoStart registry entry set: %1", exePath);
-    } else {
-        s.remove("PktSwerve");
-        LOG_INFO0("AutoStart registry entry removed");
-    }
+    QString taskName = "PktSwerve";
+    QString exePath  = QDir::toNativeSeparators(
+        QCoreApplication::applicationFilePath());
 
-#elif defined(PLATFORM_LINUX)
-    QString dir  = QDir::homePath() + "/.config/autostart";
-    QString file = dir + "/pktswerve.desktop";
-    QDir().mkpath(dir);
     if (enabled) {
-        QFile f(file);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&f);
-            out << "[Desktop Entry]\n"
-                << "Type=Application\n"
-                << "Name=PktSwerve\n"
-                << "Exec=" << QCoreApplication::applicationFilePath() << "\n"
-                << "Hidden=false\n"
-                << "NoDisplay=false\n"
-                << "X-GNOME-Autostart-enabled=true\n";
-            LOG_INFO("AutoStart .desktop written: %1", file);
-        } else {
-            LOG_ERR("Failed to write autostart .desktop: %1", file);
-        }
+        QString cmd = QString(
+                          "schtasks /Create /F /RL HIGHEST /SC ONLOGON "
+                          "/TN \"%1\" /TR \"\\\"%2\\\"\" ")
+                          .arg(taskName, exePath);
+        int ret = _wsystem(reinterpret_cast<const wchar_t*>(cmd.utf16()));
+        if (ret != 0)
+            LOG_ERROR("schtasks /Create failed, ret=%1", ret);
+        else
+            LOG_INFO("AutoStart task created: %1", exePath);
     } else {
-        QFile::remove(file);
-        LOG_INFO("AutoStart .desktop removed: %1", file);
-    }
-
-#elif defined(PLATFORM_MACOS)
-    QString dir  = QDir::homePath() + "/Library/LaunchAgents";
-    QString file = dir + "/com.pktswerve.app.plist";
-    QDir().mkpath(dir);
-    if (enabled) {
-        QFile f(file);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&f);
-            out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                << "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
-                   "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
-                << "<plist version=\"1.0\"><dict>\n"
-                << "  <key>Label</key><string>com.pktswerve.app</string>\n"
-                << "  <key>ProgramArguments</key><array>\n"
-                << "    <string>" << QCoreApplication::applicationFilePath() << "</string>\n"
-                << "  </array>\n"
-                << "  <key>RunAtLoad</key><true/>\n"
-                << "</dict></plist>\n";
-            LOG_INFO("AutoStart LaunchAgent written: %1", file);
-        } else {
-            LOG_ERR("Failed to write LaunchAgent plist: %1", file);
-        }
-    } else {
-        QFile::remove(file);
-        LOG_INFO("AutoStart LaunchAgent removed: %1", file);
+        QString cmd = QString("schtasks /Delete /F /TN \"%1\"").arg(taskName);
+        _wsystem(reinterpret_cast<const wchar_t*>(cmd.utf16()));
+        LOG_INFO0("AutoStart task deleted");
     }
 #endif
 }
