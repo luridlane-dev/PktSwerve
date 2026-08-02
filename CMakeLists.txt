@@ -12,6 +12,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurren
 
 if(WIN32)
     add_definitions(-DPLATFORM_WINDOWS)
+    add_definitions(-DWIN32_LEAN_AND_MEAN)
 elseif(APPLE)
     add_definitions(-DPLATFORM_MACOS)
 elseif(UNIX)
@@ -29,6 +30,8 @@ set(PROJECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/PacketUtils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/DnsProbe.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/DnsProbe.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/IPlatformBackend.h
     ${CMAKE_CURRENT_SOURCE_DIR}/resources.qrc
 )

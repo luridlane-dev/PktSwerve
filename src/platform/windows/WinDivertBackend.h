@@ -21,7 +21,6 @@
 #include <atomic>
 #include <QThread>
 #include <QMap>
-#include <QMutex>
 #include "platform/IPlatformBackend.h"
 
 
@@ -30,13 +29,11 @@ struct DnsState {
     quint32 origDstIp4   = 0;          // IPv4
     uint8_t origDstIp6[16] = {};       // IPv6
     quint16 origDstPort  = 0;
+    quint64 createdAt    = 0;
 };
 
 class WinDivertWorker;
 
-// ---------------------------------------------------------------------------
-// WinDivertBackend
-// ---------------------------------------------------------------------------
 class WinDivertBackend : public IPlatformBackend {
     Q_OBJECT
 public:
@@ -55,11 +52,9 @@ private:
     QThread*          m_thread     = nullptr;
     QString           m_lastError;
     std::atomic<bool> m_running    { false };
+    quint64            m_workerGeneration = 0;
 };
 
-// ---------------------------------------------------------------------------
-// WinDivertWorker
-// ---------------------------------------------------------------------------
 class WinDivertWorker : public QObject {
     Q_OBJECT
 public:
@@ -110,14 +105,13 @@ private:
     std::atomic<bool>   m_stopRequested { false };
     std::atomic<HANDLE> m_handle        { nullptr };
 
-    QMap<quint16, DnsState> m_dnsState;
-    QMutex                  m_dnsMutex;
+    // Include the transaction ID and address family to avoid source-port collisions.
+    QMap<quint64, DnsState> m_dnsState;
 
     static constexpr uint32_t MAX_PACKET_SIZE = 65535;
 
     std::vector<uint8_t> m_fragBuf1;
     std::vector<uint8_t> m_fragBuf2;
-    std::vector<uint8_t> m_modBuf;
 };
 
 #endif // PLATFORM_WINDOWS

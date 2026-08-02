@@ -10,7 +10,6 @@
 class BypassEngine;
 class SettingsWindow;
 class PopupWindow;
-
 class QAction;
 class QMenu;
 
@@ -43,4 +42,5 @@ private:
     BypassEngine*    m_engine         = nullptr;
     SettingsWindow*  m_settingsWindow = nullptr;
     PopupWindow*     m_popup          = nullptr;
+
 };

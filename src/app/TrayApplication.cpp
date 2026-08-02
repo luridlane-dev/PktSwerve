@@ -3,28 +3,28 @@
 #include "SettingsWindow.h"
 #include "PopupWindow.h"
 #include "app/Logger.h"
-#include <QMessageBox>
-#include <QMenu>
-#include <QAction>
-#include <QIcon>
-#include <QPixmap>
-#include <QImage>
-#include <QTimer>
-#include <QStandardPaths>
-#include <QDir>
 
+#include <QAction>
+#include <QDir>
+#include <QImage>
+#include <QIcon>
+#include <QMenu>
+#include <QMessageBox>
+#include <QPixmap>
+#include <QStandardPaths>
+#include <QTimer>
 
 TrayApplication::TrayApplication(int& argc, char** argv)
     : QApplication(argc, argv)
 {
     setQuitOnLastWindowClosed(false);
     setApplicationName("PktSwerve");
-    setApplicationVersion("1.0.0");
-    setOrganizationName("LuridLane");
+    setApplicationVersion("1.0.2");
+    setOrganizationName("PktSwerve");
 
-    QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    const QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     QDir().mkpath(logDir);
-    QString logPath = logDir + "/pktswerve.log";
+    const QString logPath = logDir + "/pktswerve.log";
 
 #ifdef QT_DEBUG
     Logger::instance().init(logPath, Logger::Debug);
@@ -40,7 +40,7 @@ TrayApplication::~TrayApplication()
 {
     LOG_INFO0("TrayApplication destroying");
     if (m_engine) m_engine->stop();
-    if (m_tray)   m_tray->hide();
+    if (m_tray) m_tray->hide();
 }
 
 bool TrayApplication::init()
@@ -55,10 +55,10 @@ bool TrayApplication::init()
     LOG_INFO0("System tray available");
 
     m_engine = new BypassEngine(this);
-    connect(m_engine, &BypassEngine::started,       this, &TrayApplication::onEngineStarted);
-    connect(m_engine, &BypassEngine::stopped,       this, &TrayApplication::onEngineStopped);
+    connect(m_engine, &BypassEngine::started, this, &TrayApplication::onEngineStarted);
+    connect(m_engine, &BypassEngine::stopped, this, &TrayApplication::onEngineStopped);
     connect(m_engine, &BypassEngine::errorOccurred, this, &TrayApplication::onEngineError);
-    connect(m_engine, &BypassEngine::statsUpdated,  this, &TrayApplication::onStatsUpdated);
+    connect(m_engine, &BypassEngine::statsUpdated, this, &TrayApplication::onStatsUpdated);
     connect(m_engine, &BypassEngine::configLoadFailed, this, [this](const QString& reason) {
         QMessageBox::warning(nullptr, "PktSwerve", reason);
     });
@@ -76,6 +76,14 @@ bool TrayApplication::init()
 
     m_tray->show();
     LOG_INFO0("Tray icon shown - init complete");
+
+    if (m_engine->autoStart()) {
+        LOG_INFO0("AutoStart is enabled. Triggering auto-connect sequence on boot.");
+        m_engine->start();
+    } else {
+        showPopup();
+    }
+
     return true;
 }
 
@@ -94,23 +102,22 @@ void TrayApplication::buildTrayMenu()
     m_statusAction->setEnabled(false);
     m_menu->addSeparator();
 
-    m_toggleAction = m_menu->addAction("▶  Start");
+    m_toggleAction = m_menu->addAction("Start");
     connect(m_toggleAction, &QAction::triggered, this, &TrayApplication::onToggleBypass);
 
     m_menu->addSeparator();
 
-    QAction* settingsAction = m_menu->addAction("⚙  Settings");
+    QAction* settingsAction = m_menu->addAction("Settings");
     connect(settingsAction, &QAction::triggered, this, &TrayApplication::onOpenSettings);
 
     m_menu->addSeparator();
 
-    QAction* quitAction = m_menu->addAction("✕  Quit");
+    QAction* quitAction = m_menu->addAction("Quit");
     connect(quitAction, &QAction::triggered, qApp, &QCoreApplication::quit);
 
     m_tray->setContextMenu(m_menu);
     LOG_DEBUG0("Tray context menu built");
 }
-
 
 void TrayApplication::onTrayActivated(QSystemTrayIcon::ActivationReason reason)
 {
@@ -162,9 +169,9 @@ void TrayApplication::onOpenSettings()
 
 void TrayApplication::onEngineStarted()
 {
-    LOG_INFO0("Engine started — updating tray");
+    LOG_INFO0("Engine started - updating tray");
     m_statusAction->setText("PktSwerve - Active");
-    m_toggleAction->setText("■  Stop");
+    m_toggleAction->setText("Stop");
     updateTrayIcon();
     m_tray->showMessage("PktSwerve", "Bypass active.", QSystemTrayIcon::Information, 1500);
 }
@@ -173,7 +180,7 @@ void TrayApplication::onEngineStopped()
 {
     LOG_INFO0("Engine stopped - updating tray");
     m_statusAction->setText("PktSwerve - Stopped");
-    m_toggleAction->setText("▶  Start");
+    m_toggleAction->setText("Start");
     updateTrayIcon();
 }
 
@@ -193,21 +200,19 @@ void TrayApplication::onStatsUpdated(quint64 packets, quint64 bytes)
 
 void TrayApplication::updateTrayIcon()
 {
-    bool running = m_engine->isRunning();
+    const bool running = m_engine->isRunning();
     LOG_DEBUG("updateTrayIcon | running=%1", running ? "yes" : "no");
 
-    QString resPath = running ? ":/icons/active.png" : ":/icons/inactive.png";
+    const QString resPath = running ? ":/icons/active.png" : ":/icons/inactive.png";
     QIcon icon(resPath);
-
     if (icon.isNull()) {
         const QString color = running ? "#43ea80" : "#555555";
-        QString svg = QString(
-                          "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-                          "<circle cx='16' cy='16' r='14' fill='%1'/>"
-                          "<path d='M10 16 Q13 10 16 16 Q19 22 22 16' "
-                          "      stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/>"
-                          "</svg>"
-                          ).arg(color);
+        const QString svg = QString(
+            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+            "<circle cx='16' cy='16' r='14' fill='%1'/>"
+            "<path d='M10 16 Q13 10 16 16 Q19 22 22 16' "
+            "stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round'/>"
+            "</svg>").arg(color);
         icon = QIcon(QPixmap::fromImage(QImage::fromData(svg.toUtf8(), "SVG")));
     }
 

@@ -367,6 +367,14 @@ inline QString extractDnsQuery(const uint8_t* payload, uint32_t payloadLen)
     return domain;
 }
 
+inline bool extractDnsTransactionId(const uint8_t* payload, uint32_t payloadLen,
+                                    quint16& transactionId)
+{
+    if (payloadLen < 2) return false;
+    transactionId = static_cast<quint16>((payload[0] << 8) | payload[1]);
+    return true;
+}
+
 inline bool shouldBypass(const QString& host, const BypassConfig& config)
 {
     switch (config.mode) {

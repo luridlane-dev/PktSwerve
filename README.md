@@ -1,242 +1,177 @@
 # PktSwerve
 
-A lightweight DPI (Deep Packet Inspection) bypass tool for Windows that circumvents network-level content filtering and blocking. Built with C++ and Qt, PktSwerve uses kernel-level packet manipulation via WinDivert with selective domain support for precise control over which traffic receives DPI evasion.
+PktSwerve is a Windows desktop tray application that applies packet-level techniques to selected network traffic. It uses [WinDivert](https://reqrypt.org/windivert.html) to inspect and modify packets locally; it is not a VPN, proxy, encryption tool, or anonymity service.
 
-**Official Website**: [luridlane.com](https://luridlane.com)
+![PktSwerve settings window 1](git_img/ss1.png)
+![PktSwerve settings window 1](git_img/ss2.png)
+![PktSwerve settings window 1](git_img/ss3.png)
 
-## Screenshots
+## Current status
 
-### Main Interface
-![Main Window](git_img/ss.png)
+The supported target is 64-bit Windows. The current backend uses WinDivert. The repository contains platform hooks for other operating systems, but their backends are not included in the current source tree, so macOS, Linux, and Android are not supported by this build.
 
 ## Features
 
-- **DPI Bypass**: Circumvent Deep Packet Inspection filtering at the network level
-- **Domain Selective**: Apply bypass techniques only to specified domains while leaving others unaffected
-- **Lightweight**: Minimal resource consumption (approximately 10 MB RAM, negligible CPU usage)
-- **Kernel-Level Packet Manipulation**: Direct packet interception via WinDivert driver
-- **Simple Interface**: Intuitive user interface requiring only a single action to activate bypass
-- **Local Processing**: All operations performed locally on your machine with no external traffic routing
+- System-tray interface with start/stop controls.
+- Global mode or a domain list for selective processing.
+- TLS ClientHello fragmentation for HTTPS traffic.
+- HTTP request fragmentation for plaintext HTTP on port 80.
+- Optional low-TTL, invalid-checksum, and incorrect-sequence-number decoy packets.
+- Optional DNS redirection to a configurable server and port.
+- Built-in DNS connectivity checks.
+- Optional Windows logon task for automatic startup and connection.
+- Local packet processing; traffic is not routed through a PktSwerve server.
 
-## Platform Support
+## Requirements
 
-### Currently Supported
-- **Windows 11**: Full support with complete feature set (v1.0 tested)
-- **Windows 10**: Likely compatible, not yet tested in v1.0
+### Running a release
 
-### Upcoming Support
-- **macOS**: Planned for future release
-- **Linux**: Planned for future release
-- **Android**: Planned for future release
+- 64-bit Windows 10 or Windows 11.
+- Administrator privileges. WinDivert requires access to the Windows network layer; the application requests elevation when it starts.
+- `PktSwerve.exe`, `WinDivert.dll`, and `WinDivert64.sys` in the same release directory.
 
-## System Requirements
+WinDivert loads its driver at runtime. Do not rename or remove the WinDivert files from a release package.
 
-### Windows
-- Windows 10 or Windows 11
-- Administrator privileges required
-- 10 MB RAM minimum
-- WinDivert driver (included)
+### Building from source
+
+- CMake 3.16 or newer.
+- Qt 5 or Qt 6 with the Widgets, Network, and Concurrent components.
+- A C++17-compatible compiler.
+- WinDivert development files at these paths:
+
+  ```text
+  vendor/windivert/include/windivert.h
+  vendor/windivert/lib/WinDivert.lib
+  ```
+
+The `vendor/windivert` directory is ignored by Git because it contains third-party binaries. Obtain WinDivert from its official distribution and place the required files at the paths above before configuring the project.
 
 ## Installation
 
-### Windows
+For a release build, extract the complete package to a directory and run `PktSwerve.exe`. Accept the Windows elevation prompt when asked. The application starts in the notification area; click the tray icon to open the controls.
 
-1. Download the latest release from the [releases page](https://github.com/luridlane-dev/PktSwerve/releases)
-2. Extract the archive to your desired location
-3. Run `PktSwerve.exe` with administrator privileges
-4. No additional installation or driver installation required
+If the package does not contain the WinDivert runtime files, copy `WinDivert.dll` and `WinDivert64.sys` beside `PktSwerve.exe` before launching it.
 
-## Usage
+## Building
 
-### Basic Operation
+From a PowerShell or command prompt in the repository root:
 
-1. Launch `PktSwerve.exe` with administrator privileges
-2. (Optional) Configure target domains in the **Domain List** tab for selective filtering
-3. Click the **Connect** button to activate DPI bypass
-4. Click **Disconnect** to deactivate
-
-The application will save your configuration automatically.
-
-### Configuration Tabs
-
-#### General
-Main settings and connection controls for DPI bypass activation.
-
-#### Methods
-Configure packet fragmentation and deception techniques:
-- **HTTPS/TLS ClientHello Fragmentation**: Splits TLS handshake packets to prevent SNI (Server Name Indication) detection in a single packet
-- **HTTP Fragmentation**: Fragments plaintext HTTP requests on port 80
-- **Fragmentation Options**: Customize fragment size (default: 2 bytes) and send order
-- **Deception Packets**: Deploy fake packets with manipulated TTL or checksums to confuse DPI systems
-
-#### DNS
-Configure DNS redirect settings to bypass DNS-based filtering:
-- **Enable DNS Redirect**: Route DNS queries through custom DNS servers instead of ISP defaults
-- **Preset Servers**: Pre-configured providers including Quad9 Secure and other public DNS services
-- **Custom Servers**: Specify custom DNS server IP address and port
-- **Connectivity Test**: Verify connection to selected DNS server with latency measurement
-
-#### Domain List
-Specify which domains should receive DPI bypass treatment. Leave empty to apply bypass globally to all domains.
-
-### Configuration Storage
-
-Configuration is automatically saved to:
-```
-C:\Users\[YourUsername]\AppData\Local\LuridLane\PktSwerve\config.json
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ```
 
-You can manually edit this JSON file or use the GUI to manage settings.
+With a Visual Studio generator, configure without `-G Ninja` and build the Release configuration explicitly:
 
-## How It Works
-
-PktSwerve operates at the kernel level using WinDivert to intercept and manipulate network packets. It employs multiple DPI evasion techniques:
-
-### Packet Fragmentation
-Splits packets at the TLS handshake or HTTP layer to prevent DPI systems from detecting the target domain in a single packet. The SNI (Server Name Indication) field in TLS ClientHello can be fragmented across multiple packets, making it invisible to stateless packet inspection.
-
-### Deception Techniques
-Sends carefully crafted fake packets with:
-- **Low TTL values**: Packets that expire before reaching the actual server but are processed by DPI systems, confusing their state tracking
-- **Invalid TCP checksums**: Manipulated checksums that cause DPI systems to drop or ignore packets while valid packets bypass the check
-- **Incorrect sequence numbers**: Disrupts TCP stream reassembly in DPI systems
-
-### DNS Redirection
-Routes DNS queries through alternative DNS servers that do not implement the same filtering rules as the ISP's default DNS resolver.
-
-### Domain Selective Bypass
-When domains are specified in the Domain List, only traffic to those domains receives DPI evasion treatment. Other traffic passes through normally without modification.
-
-## Technology Stack
-
-- **Language**: C++
-- **GUI Framework**: Qt
-- **Packet Manipulation**: WinDivert
-- **Platform**: Windows (kernel-mode driver interface)
-
-## Building from Source
-
-### Requirements
-- Qt 5.x or later
-- WinDivert development files
-- C++ 17 or later
-
-### Build Instructions
-
-1. Clone the repository:
-```bash
-git clone https://github.com/luridlane-dev/PktSwerve.git
-cd PktSwerve
+```powershell
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
-2. Open the Qt project file or Visual Studio solution
-3. Configure Qt paths and WinDivert include/lib paths
-4. Build the project in Release mode
-5. The compiled `PktSwerve.exe` will be in the build output directory
+The executable is written to `build/PktSwerve.exe` for a Ninja build or to the generator-specific Release output directory. Copy the WinDivert runtime files beside the executable before running it.
 
-## Configuration Examples
+## Using the application
 
-### Bypass Specific Domains Only
+### Start and stop
 
-1. Launch PktSwerve with administrator privileges
-2. Go to the **Domain List** tab
-3. Add the domains you want to bypass (one per line)
-4. Configure DPI evasion methods in the **Methods** tab as needed
-5. Click **Connect**
+1. Launch PktSwerve and approve elevation if Windows asks for it.
+2. Open the tray popup and choose **Start**.
+3. Choose **Stop** to stop packet processing.
+4. Open **Settings** to change the configuration.
 
-Example domains:
+Applying settings while the engine is running restarts the backend so the changes take effect.
+
+### Operating modes
+
+- **Disabled**: leaves traffic unchanged.
+- **Selected Sites Only**: processes only domains entered in the **Domain List** tab. Enter one domain per line. A domain also matches its subdomains; for example, `example.com` matches `api.example.com`.
+- **Global**: processes all supported HTTP/HTTPS traffic. In this mode, UDP/443 (QUIC) is dropped so compatible clients can fall back to TCP.
+
+The current user interface exposes the first, second, and third modes. The source also contains an internal whitelist enum, but there is no whitelist control in the current UI.
+
+### Methods
+
+The **Methods** tab controls the packet techniques:
+
+- **HTTPS / TLS ClientHello fragmentation** splits the TLS handshake across packets. The application buffers segmented ClientHello messages when needed and uses the hostname in SNI for domain matching.
+- **HTTP fragmentation** handles plaintext HTTP requests sent to port 80.
+- **Send fragments in reverse order** changes the order of the generated fragments. Some networks may behave differently with this option enabled.
+- **Low-TTL fake packet**, **wrong TCP checksum**, and **wrong sequence number** send optional decoy packets. These techniques can disrupt connections on some networks; enable them one at a time when troubleshooting.
+- Fragment sizes are configurable from 1 to 512 bytes. The default is 2 bytes.
+
+### DNS
+
+The **DNS** tab can redirect DNS queries to a selected preset or to a manually entered IP address and port. The redirect follows the selected operating mode: in **Selected Sites Only** mode, only matching domains are redirected; in **Global** mode, all observed UDP DNS queries are eligible.
+
+Use **Test Connection** to send direct UDP DNS queries to the configured server. The test reports the result and latency for several known domains. It does not change the system DNS settings.
+
+### Automatic startup
+
+The **Launch at Windows startup** option creates or removes a Windows Task Scheduler task named `PktSwerve`. When enabled, the task runs at logon with the highest requested privileges and starts the application’s automatic connection sequence.
+
+## Configuration and logs
+
+Settings are saved as JSON in Qt’s Windows application configuration directory. On a typical Windows installation this is under:
+
+```text
+%LOCALAPPDATA%\PktSwerve\config.json
 ```
-example.com
-subdomain.example.org
-restricted-site.net
-```
 
-### Custom DNS Server
+The exact path is written to the application log. The log is stored in the same local application-data area as `pktswerve.log`; a previous log is rotated to `pktswerve.log.1` when the application starts.
 
-1. Go to the **DNS** tab
-2. Enable "Enable DNS redirect"
-3. Enter custom DNS server IP (e.g., `8.8.8.8`) and port (e.g., `53`)
-4. Click "Test Connection" to verify connectivity
-5. Click **Apply** and **Save**
+Use **Reset to Defaults** in the Settings window instead of editing the JSON file while the application is running. Manual edits must contain valid JSON and valid DNS address/port values.
 
-## Advanced Options
+## How packet processing works
 
-- **HTTP Fragment Size**: Adjust fragment size in bytes (default: 2) for optimal bypass effectiveness. Smaller values may be more effective but slower.
-- **HTTPS Fragment Size**: Customize TLS packet fragmentation (default: 2 bytes)
-- **Fake Packet TTL**: Control the lifetime of decoy packets (default: 8 hops)
-- **Send Fragments in Reverse Order**: Sends fragment 2 before fragment 1 to further confuse inspection systems
+PktSwerve opens a WinDivert network-layer handle and forwards packets after applying the selected method. For TCP traffic, it recognizes TLS ClientHello messages and basic HTTP methods, extracts SNI or `Host`, and checks that hostname against the configured mode. DNS redirection records the original destination and rewrites matching replies back to the requesting client.
 
-## Performance Characteristics
-
-PktSwerve is designed to have minimal system impact:
-
-- **Memory Usage**: Approximately 10 MB RAM
-- **CPU Usage**: Negligible (typically <1% during operation)
-- **Network Latency**: Minimal additional latency depending on configuration
-- **Throughput**: No significant impact on connection speed
-
-## Privacy and Security
-
-- **Local Processing**: All packet manipulation occurs locally on your machine
-- **No External Routing**: Traffic is not routed through external servers or proxies
-- **No Traffic Logging**: PktSwerve does not log, analyze, or store network traffic
-- **DPI Bypass Only**: This tool modifies packets to evade DPI inspection; it does not encrypt traffic or provide anonymity beyond DPI evasion
-
-For encryption and anonymity, use PktSwerve in combination with a VPN or proxy service.
+PktSwerve does not decrypt TLS traffic. It can only match hostnames that are visible in the packet data, and it does not provide protection against traffic analysis, endpoint tracking, or application-level logging.
 
 ## Troubleshooting
 
-### PktSwerve requires administrator privileges
-Run the application with administrator rights. Right-click `PktSwerve.exe` and select "Run as administrator". Administrator privileges are required to access kernel-mode packet drivers.
+### The application exits or cannot start WinDivert
 
-### Connection test fails in DNS tab
-Verify that:
-- The target DNS server IP address and port are correct
-- Network connectivity to the DNS server is available
-- No firewall or ISP is blocking DNS queries to that server
-- Port 53 (default DNS port) is not blocked
+- Run the application as administrator and accept the elevation prompt.
+- Verify that `WinDivert.dll` and `WinDivert64.sys` are beside `PktSwerve.exe`.
+- Check that the WinDivert files match the architecture of the executable.
+- Check the log for the WinDivert error code.
+- Temporarily check whether another packet-filtering product or security policy is blocking WinDivert.
 
-### Bypass not working effectively
-- Ensure correct domains are added to the Domain List (if using selective mode)
-- Verify appropriate DPI evasion methods are enabled in the Methods tab
-- Experiment with different fragment sizes and deception techniques
-- Some DPI systems may require multiple evasion methods in combination
-- Network conditions and ISP DPI implementation vary; results are not guaranteed
+### DNS test fails
 
-### Application crashes on startup
-- Ensure you are running Windows 10 or Windows 11
-- Run with administrator privileges
-- Verify that WinDivert driver can be loaded (may require driver signature enforcement settings to be adjusted)
-- Check that no conflicting packet filtering software (like some VPNs) is installed
+- Verify the server address and port in the DNS tab.
+- Check that the network allows outbound UDP traffic to that port.
+- Test the server while PktSwerve is stopped if another filter is active.
 
-## Known Limitations
+### A site does not work after enabling a method
 
-- Windows only in v1.0 (macOS, Linux, Android support planned)
-- WinDivert requires Windows driver support
-- Some advanced DPI systems may implement additional detection methods
-- Results depend on specific ISP/network DPI configuration
+- Confirm that the domain is present in **Selected Sites Only** mode.
+- Try the default fragment size of 2 bytes.
+- Disable reverse ordering and the decoy-packet options first.
+- Remember that some applications use QUIC or encrypted DNS paths that are outside the TCP/UDP handling described above.
 
-## Contributing
+### No tray icon appears
 
-Contributions are welcome. Please submit pull requests with improvements, bug fixes, or platform-specific implementations (macOS, Linux, Android).
+The application requires a Windows notification area. If the process starts without a tray, check Windows notification-area settings and the log for the `System tray is not available` message.
+
+## Development notes
+
+There are currently no automated CTest tests in the project. A successful configure and build verifies compilation and linking, but it does not verify behavior on a specific ISP or network. Packet-processing changes should be tested on an isolated network and with a way to stop the backend quickly.
+
+## Privacy and security
+
+Packet inspection and modification happen locally. PktSwerve does not provide a remote relay, encrypt traffic, or make the user anonymous. Running with administrator privileges gives the process access to low-level network operations, so use release binaries and WinDivert files from sources you trust.
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+PktSwerve is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE) for the full text.
 
 ## Disclaimer
 
-**Important**: PktSwerve is provided for educational, research, and legitimate circumvention of censorship purposes. Users are entirely responsible for ensuring their usage complies with applicable laws and regulations in their jurisdiction.
+Use PktSwerve only on networks and traffic you are authorized to modify. DPI bypass may be restricted by local law, network policy, or a service agreement. You are responsible for complying with all applicable rules and for any consequences of using the software.
 
-- Unauthorized network access is illegal in most jurisdictions
-- Some networks explicitly prohibit DPI bypass tools
-- This tool does not provide legal protection or anonymity
-- Use at your own risk and with appropriate legal consideration
+## Links
 
-The creators and maintainers of PktSwerve assume no liability for misuse or damages resulting from this software.
-
-## Support
-
-For issues, feature requests, bug reports, or questions, please open an issue on the [GitHub repository](https://github.com/luridlane-dev/PktSwerve/issues).
-
-Visit [luridlane.com](https://luridlane.com) for additional information.
+- [GitHub repository](https://github.com/luridlane-dev/PktSwerve)
+- [Issue tracker](https://github.com/luridlane-dev/PktSwerve/issues)
+- [Project website](https://luridlane.com)

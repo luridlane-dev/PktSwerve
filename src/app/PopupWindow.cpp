@@ -20,6 +20,7 @@
 #include <QSequentialAnimationGroup>
 #include <QFocusEvent>
 #include <QMouseEvent>
+#include <QTimer>
 
 static QString fmtBytes(quint64 b)
 {
@@ -61,13 +62,16 @@ PopupWindow::PopupWindow(BypassEngine* engine, QWidget* parent)
 
 bool PopupWindow::eventFilter(QObject* obj, QEvent* e)
 {
+    Q_UNUSED(obj)
     if (isVisible() && e->type() == QEvent::MouseButtonPress) {
         QPoint globalPos = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
         if (!geometry().contains(globalPos)) {
             hide();
         }
     }
-    if (e->type() == QEvent::ApplicationDeactivate) {
+    if (isVisible()
+        && (e->type() == QEvent::ApplicationDeactivate
+            || e->type() == QEvent::WindowDeactivate)) {
         hide();
     }
     return false;
@@ -113,6 +117,11 @@ void PopupWindow::focusOutEvent(QFocusEvent* e)
 {
     LOG_DEBUG("PopupWindow focusOutEvent | reason=%1", static_cast<int>(e->reason()));
     QWidget::focusOutEvent(e);
+
+    QTimer::singleShot(0, this, [this]() {
+        if (isVisible() && !isActiveWindow())
+            hide();
+    });
 }
 
 void PopupWindow::buildUi()
@@ -207,11 +216,11 @@ void PopupWindow::buildUi()
     lay->addWidget(quitBtn);
     lay->addSpacing(14);
 
-    QLabel* dev = new QLabel("<a href=\"https://luridlane.com\" style=\"text-decoration: none; color: #888;\">by Lurid Lane</a>");
-    dev->setObjectName("devLabel");
-    dev->setAlignment(Qt::AlignHCenter);
-    dev->setOpenExternalLinks(true);
-    lay->addWidget(dev);
+    QLabel* developerLabel = new QLabel("Developed by Lurid Lane");
+    developerLabel->setObjectName("developerLabel");
+    developerLabel->setAlignment(Qt::AlignHCenter);
+    developerLabel->setStyleSheet("color: #888; font-size: 11px;");
+    lay->addWidget(developerLabel);
 
     connect(settingsBtn, &QPushButton::clicked, this, &PopupWindow::onSettingsClicked);
     connect(quitBtn,     &QPushButton::clicked, this, &PopupWindow::onQuitClicked);

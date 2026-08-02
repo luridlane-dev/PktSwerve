@@ -1,5 +1,6 @@
 #include "SettingsWindow.h"
 #include "core/BypassEngine.h"
+#include "core/DnsProbe.h"
 #include "app/Logger.h"
 
 #include <QTabWidget>
@@ -19,14 +20,9 @@
 #include <QLabel>
 #include <QMessageBox>
 #include <QScrollArea>
-#include <QTcpSocket>
-#include <QUdpSocket>
 #include <QtConcurrent/QtConcurrent>
-#include <QHostInfo>
 #include <QFuture>
 #include <QPointer>
-#include <QDesktopServices>
-#include <QUrl>
 
 static const char* NOTE_STYLE =
     "color: #888; font-size: 11px; font-style: italic;";
@@ -163,7 +159,7 @@ void SettingsWindow::buildUi()
 
     QPushButton* cancelBtn = new QPushButton("Cancel");
     cancelBtn->setObjectName("cancelBtn");
-    QPushButton* applyBtn  = new QPushButton("Apply & Save");
+    QPushButton* applyBtn  = new QPushButton("Apply");
     applyBtn->setObjectName("applyBtn");
     botRow->addWidget(cancelBtn);
     botRow->addWidget(applyBtn);
@@ -421,9 +417,15 @@ void SettingsWindow::buildAboutTab(QWidget* tab)
     titleLabel->setStyleSheet("font-size: 24px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px;");
     mainLay->addWidget(titleLabel);
 
-    QLabel* versionLabel = new QLabel("Version 1.0.0");
+    QLabel* versionLabel = new QLabel(
+        "Version " + QCoreApplication::applicationVersion()
+        );
     versionLabel->setStyleSheet("font-size: 12px; color: #555; margin-top: 2px; margin-bottom: 24px;");
     mainLay->addWidget(versionLabel);
+
+    QLabel* developerLabel = new QLabel("Developed by Lurid Lane · Jadis0x");
+    developerLabel->setStyleSheet("font-size: 11px; color: #777; margin-bottom: 18px;");
+    mainLay->addWidget(developerLabel);
 
     QLabel* descLabel = new QLabel(
         "PktSwerve is a custom packet manipulation tool designed to bypass network "
@@ -442,30 +444,6 @@ void SettingsWindow::buildAboutTab(QWidget* tab)
     noteLabel->setMaximumWidth(520);
     noteLabel->setStyleSheet("font-size: 11px; color: #666; font-style: italic; line-height: 1.4; margin-bottom: 28px;");
     mainLay->addWidget(noteLabel);
-
-    QPushButton* devBtn = new QPushButton("by Lurid Lane");
-    devBtn->setCursor(Qt::PointingHandCursor);
-    devBtn->setFixedWidth(120);
-    devBtn->setStyleSheet(
-        "QPushButton {"
-        "    background: #ffffff;"
-        "    color: #000000;"
-        "    border: none;"
-        "    border-radius: 6px;"
-        "    padding: 8px 0px;"
-        "    font-size: 12px;"
-        "    font-weight: 600;"
-        "}"
-        "QPushButton:hover {"
-        "    background: #d0d0d0;"
-        "}"
-        );
-
-    QObject::connect(devBtn, &QPushButton::clicked, []() {
-        QDesktopServices::openUrl(QUrl("https://luridlane.com"));
-    });
-
-    mainLay->addWidget(devBtn, 0, Qt::AlignLeft);
 
     mainLay->addStretch();
 }
@@ -624,6 +602,55 @@ void SettingsWindow::onCheckConnectivity()
                 });
 
         watcher->setFuture(QtConcurrent::run([ip, port]() -> QString {
+            QHostAddress server;
+            if (!server.setAddress(ip)) {
+                return "<span style='color:#ff4d4d;'><b>Invalid DNS server address.</b></span>";
+            }
+
+            const DnsProbeReport report = DnsProbe::probe(
+                server, static_cast<quint16>(port), DnsProbe::defaultTargets());
+            QString result = QString("<div style='line-height: 1.2;'>"
+                                     "<span style='font-size:14px; font-weight:600; color:#ffffff;'>"
+                                     "Target Server: %1:%2</span><br>")
+                                 .arg(ip, QString::number(port));
+            if (!report.serverError.isEmpty()) {
+                return result + QString("<span style='color:#ff4d4d;'><b>Test error:</b> %1</span></div>")
+                                    .arg(report.serverError.toHtmlEscaped());
+            }
+
+            qint64 totalLatency = 0;
+            int successCount = 0;
+            QString details;
+            for (const DnsProbeTargetResult& probeResult : report.targets) {
+                if (!probeResult.succeeded) {
+                    details += QString("<tr><td width='16'><span style='color:#ff4d4d;'>&#9679;</span></td>"
+                                       "<td width='105'>%1:</td><td style='color:#777;'>- %2</td></tr>")
+                                   .arg(probeResult.target.label.toHtmlEscaped(),
+                                        probeResult.error.toHtmlEscaped());
+                    continue;
+                }
+                const QString color = probeResult.latencyMs > 250 ? "#ff4d4d"
+                                     : probeResult.latencyMs > 80 ? "#fbbf24" : "#4ade80";
+                details += QString("<tr><td width='16'><span style='color:%1;'>&#9679;</span></td>"
+                                   "<td width='105'>%2:</td><td style='color:#777;'>- %3 ms</td></tr>")
+                               .arg(color, probeResult.target.label.toHtmlEscaped())
+                               .arg(probeResult.latencyMs);
+                totalLatency += probeResult.latencyMs;
+                ++successCount;
+            }
+
+            const int failures = report.targets.size() - successCount;
+            result += failures == 0
+                ? "<span style='color:#4ade80;'><b>Status:</b> Resolver returned usable answers.</span><br>"
+                : QString("<span style='color:#fbbf24;'><b>Resolver warning:</b> %1 domain(s) had no usable answer.</span><br>").arg(failures);
+            if (successCount > 0)
+                result += QString("<span style='color:#888;'>Average latency:</span> %1 ms<br>")
+                              .arg(totalLatency / successCount);
+            return result + "<hr><table width='100%' cellspacing='0' cellpadding='1'>" + details + "</table></div>";
+        }));
+
+#if 0 // Legacy probe implementation, replaced by DnsProbe.
+        watcher->setFuture(QtConcurrent::run([ip, port]() -> QString {
             QString result = "<div style='line-height: 1.2;'>";
 
             LOG_INFO0("DNS test worker: checking internet connectivity");
@@ -758,6 +785,7 @@ void SettingsWindow::onCheckConnectivity()
             result += "</div>";
             return result;
         }));
+#endif
     };
 
     if (wasRunning) {
@@ -783,7 +811,7 @@ void SettingsWindow::onResetDefaults()
     QMessageBox::StandardButton reply;
     reply = QMessageBox::question(this, "Reset to Defaults",
                                   "Are you sure you want to reset all settings to their default values?\n\n"
-                                  "(Changes will not take effect until you click 'Apply & Save').",
+                                  "(Changes will not take effect until you click 'Apply').",
                                   QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {

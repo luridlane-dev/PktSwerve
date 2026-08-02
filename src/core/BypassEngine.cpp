@@ -10,6 +10,16 @@
 #include <QSettings>
 #include <QTextStream>
 
+namespace {
+
+QString configPath()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation))
+        .filePath("config.json");
+}
+
+}
+
 #ifdef PLATFORM_WINDOWS
 #  include "platform/windows/WinDivertBackend.h"
 #elif defined(PLATFORM_LINUX)
@@ -85,6 +95,8 @@ bool BypassEngine::start()
                     LOG_ERROR("Backend error: %1", msg);
                 });
 
+
+
         LOG_INFO0("Backend signals connected");
     }
 
@@ -117,22 +129,31 @@ bool BypassEngine::start()
 
 
     bool ok = m_backend->start(m_config);
-    if (!ok)
+    if (!ok){
         LOG_ERR0("Backend::start() returned false");
-    else
+    }
+    else{
         LOG_INFO0("Backend started successfully");
+
+    }
     return ok;
 }
 
 bool BypassEngine::stop()
 {
     LOG_INFO0("BypassEngine::stop() called");
+
     if (!m_backend) {
         LOG_WARN0("stop() called but backend is null");
         return true;
     }
+
+    const bool wasRunning = m_backend->isRunning();
+
     bool ok = m_backend->stop();
+
     LOG_INFO("Backend stop returned: %1", ok ? "true" : "false");
+
     return ok;
 }
 
@@ -160,8 +181,7 @@ void BypassEngine::setConfig(const BypassConfig& cfg)
 
 void BypassEngine::loadConfig()
 {
-    QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
-    + "/config.json";
+    QString path = configPath();
     LOG_INFO("Loading config from: %1", path);
 
     QFile f(path);
@@ -237,7 +257,7 @@ void BypassEngine::saveConfig()
     obj["blacklist"] = bl;
     obj["whitelist"] = wl;
 
-    QString filePath = dir + "/config.json";
+    QString filePath = configPath();
     QFile f(filePath);
     if (f.open(QIODevice::WriteOnly)) {
         f.write(QJsonDocument(obj).toJson());
