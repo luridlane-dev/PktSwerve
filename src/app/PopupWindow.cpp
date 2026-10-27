@@ -95,6 +95,13 @@ void PopupWindow::showAtTray(const QRect& trayGeo)
     int x = avail.right() - width() - 12;
     int y = avail.bottom() - height() - 12;
 
+    // macOS menu bar (or a top taskbar): open just below the icon instead of
+    // in the bottom-right corner.
+    if (trayGeo.isValid() && trayGeo.center().y() < avail.center().y()) {
+        x = trayGeo.center().x() - width() / 2;
+        y = avail.top() + 8;
+    }
+
     if (x < avail.left()) x = avail.left() + 8;
     if (x + width() > avail.right()) x = avail.right() - width() - 8;
 

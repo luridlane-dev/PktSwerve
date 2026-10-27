@@ -15,7 +15,7 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.*'
+          version: '6.11.*'   # same Qt line as the Windows build
           cache: true
 
       - name: Configure (universal, Apple Silicon + Intel)
@@ -26,7 +26,18 @@ jobs:
           -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
 
       - name: Build
-        run: cmake --build build --parallel
+        run: |
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee build.log
+
+      # Job logs need a GitHub login, annotations don't: copy the compiler
+      # errors into one so they can be read from the public API.
+      - name: Publish compiler errors
+        if: failure()
+        run: |
+          errors=$(grep -E "error:|Error [0-9]|undefined symbol|ld: " build.log | head -40 \
+                   | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          echo "::error title=Build errors::${errors:-no error lines found, see the Build step log}"
 
       - name: Bundle Qt into the app and ad-hoc sign it
         run: |

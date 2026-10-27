@@ -129,8 +129,16 @@ bool BypassEngine::start()
         LOG_WARN0("Insufficient privileges - requesting elevation and exiting current instance");
         if (!m_elevationRequested) {
             m_elevationRequested = true;
-            m_backend->requestPrivilegeElevation();
-            QCoreApplication::exit(0);
+            if (m_backend->requestPrivilegeElevation()) {
+                QCoreApplication::exit(0);
+            } else {
+                // Prompt cancelled or failed: keep this instance alive so the
+                // user can try again instead of the app silently quitting.
+                m_elevationRequested = false;
+                m_lastError = "Administrator permission was not granted.";
+                LOG_WARN0("Privilege elevation was cancelled or failed");
+                emit errorOccurred(m_lastError);
+            }
         }
         return false;
     }
@@ -288,6 +296,15 @@ void BypassEngine::saveConfig()
     QFile f(filePath);
     if (f.open(QIODevice::WriteOnly)) {
         f.write(QJsonDocument(obj).toJson());
+        f.close();
+#ifdef PLATFORM_MACOS
+        // The elevated (root) instance writes into the user's home; keep the
+        // files owned by the user so the normal instance can still save.
+        if (geteuid() == 0) {
+            chownLikeHome(dir);
+            chownLikeHome(filePath);
+        }
+#endif
         LOG_INFO("Config saved to: %1", filePath);
     } else {
         LOG_ERROR("Failed to save config to: %1", filePath);

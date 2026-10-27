@@ -20,7 +20,9 @@ class PfWorker;
 // TCP segments (and optionally as two TLS records).  DNS queries are caught
 // the same way and forwarded to the configured resolver.
 //
-// pf rules live in their own anchor and are removed again on stop().
+// pf rules live in a per-process anchor and are removed again on stop().
+// A small root watchdog removes them too if the app dies without stopping,
+// since stale redirect rules would break every web connection.
 namespace PfPorts {
 constexpr int Http  = 9876;
 constexpr int Https = 9877;
@@ -45,12 +47,17 @@ private:
     std::shared_ptr<PfShared> m_state;     // lets stop() reach the worker without a raw pointer
     QString                   m_lastError;
     QString                   m_pfToken;   // reference token from `pfctl -E`
+    QString                   m_anchor;    // per-process pf anchor
+    qint64                    m_watchdogPid = 0;
     std::atomic<bool>         m_running{false};
     quint64                   m_workerGeneration = 0;
 
     bool fail(const QString& message);
     bool setupPf(const BypassConfig& config);
     bool clearPf();
+    void clearStaleAnchors();
+    void startWatchdog();
+    void stopWatchdog();
 };
 
 // -----------------------------------------------------------------------

@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include <QCoreApplication>
@@ -56,10 +57,12 @@ struct PfShared {
 
 namespace {
 
-// Our own pf rules live here.  "com.apple/*" is already evaluated by the
-// stock /etc/pf.conf, so no edit of the system ruleset is needed.
-const char* const kPfAnchor = "com.apple/250.PktSwerve";
-const char* const kPfctl    = "/sbin/pfctl";
+// Our pf rules live in "com.apple/250.PktSwerve.<pid>".  "com.apple/*" is
+// already evaluated by the stock /etc/pf.conf, so the system ruleset is never
+// edited; the pid suffix lets a new instance tell its rules from a dead one's.
+const QString kAnchorParent = QStringLiteral("com.apple");
+const QString kAnchorName   = QStringLiteral("250.PktSwerve");
+const QString kPfctl        = QStringLiteral("/sbin/pfctl");
 
 constexpr int kMaxConnections = 800;   // two threads and two fds each
 constexpr int kConnectTimeoutMs = 10000;
@@ -622,6 +625,17 @@ QByteArray buildRules(const BypassConfig& c)
     if (c.fragmentHttpsPersist) redirect("tcp", 443, PfPorts::Https);
     if (c.dnsRedirect)          redirect("udp", 53,  PfPorts::Dns);
 
+    // The proxy is IPv4-only.  On IPv6 networks the same connections would
+    // simply go around it, so refuse them with an immediate reset/unreachable;
+    // browsers and mDNSResponder then fall back to IPv4 within milliseconds.
+    auto refuseIpv6 = [&](const QString& proto, int port) {
+        filter.prepend(QString("block return out quick inet6 proto %1 from any to any port %2 user { >root }")
+                           .arg(proto).arg(port));
+    };
+    if (c.fragmentHttpRequests) refuseIpv6("tcp", 80);
+    if (c.fragmentHttpsPersist) refuseIpv6("tcp", 443);
+    if (c.dnsRedirect)          refuseIpv6("udp", 53);
+
     // Same policy as the Windows backend: QUIC hides the SNI, so in Global
     // mode it is dropped and browsers fall back to TCP.  Applies to both IPv4 and IPv6.
     if (c.mode == BypassMode::GlobalMode)
@@ -635,14 +649,12 @@ QByteArray buildRules(const BypassConfig& c)
 // -----------------------------------------------------------------------
 // PfBackend
 // -----------------------------------------------------------------------
-PfBackend::PfBackend(QObject* parent) : IPlatformBackend(parent)
+PfBackend::PfBackend(QObject* parent)
+    : IPlatformBackend(parent)
+    , m_anchor(QString("%1/%2.%3").arg(kAnchorParent, kAnchorName).arg(getpid()))
 {
-    // A previous run that crashed would leave redirect rules pointing at a
-    // dead port, which breaks every web connection.  Clear them (needs root).
-    if (geteuid() == 0) {
-        runPfctl({"-a", kPfAnchor, "-F", "rules"});
-        runPfctl({"-a", kPfAnchor, "-F", "nat"});
-    }
+    if (geteuid() == 0)
+        clearStaleAnchors();
 }
 
 PfBackend::~PfBackend() { stop(); }
@@ -656,13 +668,72 @@ bool PfBackend::requestPrivilegeElevation()
 
     // Relaunch as root.  HOME is pinned to the real user's home so the elevated
     // instance reads the same config/log folders; the trailing '&' lets
-    // osascript return instead of waiting for the app to quit.
+    // osascript return as soon as the app is launched.
     const QString command = QString("HOME=%1 %2 >/dev/null 2>&1 &")
                                 .arg(shellQuote(QDir::homePath()),
                                      shellQuote(QCoreApplication::applicationFilePath()));
     const QString script = QString("do shell script \"%1\" with administrator privileges")
                                .arg(asQuote(command));
-    return QProcess::startDetached("/usr/bin/osascript", {"-e", script});
+
+    // Wait for the password prompt: osascript exits non-zero when the user
+    // cancels, and in that case this instance must keep running.
+    QProcess p;
+    p.start("/usr/bin/osascript", {"-e", script});
+    if (!p.waitForStarted(5000))
+        return false;
+    p.waitForFinished(-1);
+    const bool ok = p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0;
+    if (!ok)
+        LOG_WARN("Elevation not granted: %1", QString::fromLocal8Bit(p.readAllStandardError()).trimmed());
+    return ok;
+}
+
+// Rules of an instance that died without stopping keep redirecting web
+// traffic to a closed port.  Remove every PktSwerve anchor whose process is
+// gone (including the fixed-name anchor used by earlier builds).
+void PfBackend::clearStaleAnchors()
+{
+    static const QRegularExpression re(
+        QString("(%1(?:\\.(\\d+))?)$").arg(QRegularExpression::escape(kAnchorName)));
+
+    const PfctlResult list = runPfctl({"-a", kAnchorParent, "-s", "Anchors"});
+    for (const QString& line : list.output.split('\n')) {
+        const QRegularExpressionMatch m = re.match(line.trimmed());
+        if (!m.hasMatch()) continue;
+        const qint64 pid = m.captured(2).toLongLong();      // 0 for the old fixed name
+        if (pid == getpid() || (pid > 0 && ::kill(static_cast<pid_t>(pid), 0) == 0))
+            continue;                                       // ours, or still alive
+        const QString anchor = kAnchorParent + "/" + m.captured(1);
+        LOG_INFO("Removing stale pf anchor %1", anchor);
+        runPfctl({"-a", anchor, "-F", "rules"});
+        runPfctl({"-a", anchor, "-F", "nat"});
+    }
+}
+
+// Detached root shell that waits for this process to exit and then removes
+// our rules and pf reference.  Covers crashes and force-quits; a normal stop
+// kills it first and cleans up itself.
+void PfBackend::startWatchdog()
+{
+    QString script = QString("while kill -0 %1 2>/dev/null; do sleep 2; done; "
+                             "%2 -a '%3' -F rules; %2 -a '%3' -F nat")
+                         .arg(QString::number(getpid()), kPfctl, m_anchor);
+    if (!m_pfToken.isEmpty())
+        script += QString("; %1 -X %2").arg(kPfctl, m_pfToken);
+
+    qint64 pid = 0;
+    if (QProcess::startDetached("/bin/sh", {"-c", script}, QString(), &pid))
+        m_watchdogPid = pid;
+    else
+        LOG_WARN0("Could not start the pf cleanup watchdog");
+}
+
+void PfBackend::stopWatchdog()
+{
+    if (m_watchdogPid > 0) {
+        ::kill(static_cast<pid_t>(m_watchdogPid), SIGTERM);
+        m_watchdogPid = 0;
+    }
 }
 
 bool PfBackend::fail(const QString& message)
@@ -675,10 +746,6 @@ bool PfBackend::fail(const QString& message)
 
 bool PfBackend::setupPf(const BypassConfig& config)
 {
-    // Clear leftovers of an earlier run first.
-    runPfctl({"-a", kPfAnchor, "-F", "rules"});
-    runPfctl({"-a", kPfAnchor, "-F", "nat"});
-
     // -E takes a reference on pf instead of just switching it on, so other
     // users of pf (and macOS itself) are left alone when we release it.
     const PfctlResult enable = runPfctl({"-E"});
@@ -687,19 +754,21 @@ bool PfBackend::setupPf(const BypassConfig& config)
     const QRegularExpressionMatch m = QRegularExpression("Token\\s*:\\s*(\\d+)").match(enable.output);
     m_pfToken = m.hasMatch() ? m.captured(1) : QString();
 
-    const PfctlResult load = runPfctl({"-a", kPfAnchor, "-f", "-"}, buildRules(config));
+    const PfctlResult load = runPfctl({"-a", m_anchor, "-f", "-"}, buildRules(config));
     if (!load.ok) {
         clearPf();
         return fail("pf rejected the redirect rules: " + load.output);
     }
-    LOG_INFO("pf rules loaded into anchor %1", QString::fromLatin1(kPfAnchor));
+    startWatchdog();
+    LOG_INFO("pf rules loaded into anchor %1", m_anchor);
     return true;
 }
 
 bool PfBackend::clearPf()
 {
-    runPfctl({"-a", kPfAnchor, "-F", "rules"});
-    runPfctl({"-a", kPfAnchor, "-F", "nat"});
+    stopWatchdog();
+    runPfctl({"-a", m_anchor, "-F", "rules"});
+    runPfctl({"-a", m_anchor, "-F", "nat"});
     if (!m_pfToken.isEmpty()) {
         runPfctl({"-X", m_pfToken});
         m_pfToken.clear();
@@ -729,6 +798,11 @@ bool PfBackend::start(const BypassConfig& config)
     if (!setupPf(config)) {
         delete worker;
         return false;
+    }
+    if (config.dnsRedirect) {
+        // Answers cached before the redirect was active may be the poisoned ones.
+        QProcess::startDetached("/usr/bin/dscacheutil", {"-flushcache"});
+        QProcess::startDetached("/usr/bin/killall", {"-HUP", "mDNSResponder"});
     }
 
     m_state = worker->state();
