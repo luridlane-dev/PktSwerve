@@ -23,6 +23,7 @@
 #include <QtConcurrent/QtConcurrent>
 #include <QFuture>
 #include <QPointer>
+#include <QProcess>
 
 static const char* NOTE_STYLE =
     "color: #888; font-size: 11px; font-style: italic;";
@@ -194,7 +195,11 @@ void SettingsWindow::buildGeneralTab(QWidget* tab)
 
     QGroupBox* sysGroup = new QGroupBox("SYSTEM");
     QVBoxLayout* sg = new QVBoxLayout(sysGroup);
+#ifdef PLATFORM_MACOS
+    m_autoStartCheck = new QCheckBox("Launch at login");
+#else
     m_autoStartCheck = new QCheckBox("Launch at Windows startup");
+#endif
     sg->addWidget(m_autoStartCheck);
     lay->addWidget(sysGroup);
 
@@ -241,6 +246,15 @@ void SettingsWindow::buildMethodsTab(QWidget* tab)
         "Sends fragment 2 before fragment 1. "
         "May confuse additional DPI systems; disable if connections break."));
 
+#ifdef PLATFORM_MACOS
+    m_tlsRecSplit = new QCheckBox("Split TLS record at the SNI");
+    fg->addWidget(m_tlsRecSplit);
+    fg->addWidget(makeNote(
+        "Re-frames the ClientHello as two TLS records cut in the middle of the "
+        "domain name, so DPI that reassembles TCP segments still can't read it. "
+        "Disable if some sites stop loading."));
+#endif
+
     QFormLayout* fragParams = new QFormLayout();
     m_httpFragSize  = new QSpinBox(); m_httpFragSize->setRange(1, 512);
     m_httpsFragSize = new QSpinBox(); m_httpsFragSize->setRange(1, 512);
@@ -284,6 +298,18 @@ void SettingsWindow::buildMethodsTab(QWidget* tab)
         "Fake packet lifetime in hops. Too high and the packet may reach the destination."));
 
     lay->addWidget(fakeGroup);
+
+#ifdef PLATFORM_MACOS
+    // The macOS backend is a local TCP proxy: the kernel builds the segments,
+    // so packet-level tricks (reordering, fake/invalid packets) are not possible.
+    const QString unsupported = "Not available on macOS (proxy-based backend).";
+    for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum,
+                                      m_wrongSeq, m_fakeTTL}) {
+        w->setEnabled(false);
+        w->setToolTip(unsupported);
+    }
+    fakeGroup->setToolTip(unsupported);
+#endif
 
     lay->addStretch();
 }
@@ -472,6 +498,7 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_fragHttps->setChecked(cfg.fragmentHttpsPersist);
     m_fragHttp->setChecked(cfg.fragmentHttpRequests);
     m_reverseFrag->setChecked(cfg.reverseFrag);
+    if (m_tlsRecSplit) m_tlsRecSplit->setChecked(cfg.tlsRecordSplit);
     m_httpFragSize->setValue(cfg.httpFragmentSize);
     m_httpsFragSize->setValue(cfg.httpsFragmentSize);
     m_fakePackets->setChecked(cfg.fakePackets);
@@ -497,7 +524,8 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.fragmentHttpsPersist = m_fragHttps->isChecked();
     cfg.fragmentHttpRequests = m_fragHttp->isChecked();
     cfg.reverseFrag          = m_reverseFrag->isChecked();
-    cfg.httpFragmentSize     = m_httpFragSize->value();
+    cfg.tlsRecordSplit       = m_tlsRecSplit && m_tlsRecSplit->isChecked();
+    cfg.httpFragmentSize    = m_httpFragSize->value();
     cfg.httpsFragmentSize    = m_httpsFragSize->value();
     cfg.fakePackets          = m_fakePackets->isChecked();
     cfg.wrongChecksum        = m_wrongChecksum->isChecked();
@@ -536,6 +564,10 @@ void SettingsWindow::onApply()
 #ifdef PLATFORM_WINDOWS
     LOG_INFO0("Flushing DNS cache (ipconfig /flushdns)");
     system("ipconfig /flushdns >nul 2>&1");
+#elif defined(PLATFORM_MACOS)
+    LOG_INFO0("Flushing DNS cache (dscacheutil + mDNSResponder)");
+    QProcess::execute("/usr/bin/dscacheutil", {"-flushcache"});
+    QProcess::execute("/usr/bin/killall", {"-HUP", "mDNSResponder"});
 #endif
 
     if (m_engine->isRunning()) {
@@ -649,7 +681,7 @@ void SettingsWindow::onCheckConnectivity()
             return result + "<hr><table width='100%' cellspacing='0' cellpadding='1'>" + details + "</table></div>";
         }));
 
-#if 0 // Legacy probe implementation, replaced by DnsProbe.
+#if 0 // Replaced by DnsProbe; retained only until the next source-format sweep.
         watcher->setFuture(QtConcurrent::run([ip, port]() -> QString {
             QString result = "<div style='line-height: 1.2;'>";
 

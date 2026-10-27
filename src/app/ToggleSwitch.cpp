@@ -1,3 +1,5 @@
+// ToggleSwitch.h — yeni dosya olarak projeye ekle
+
 #pragma once
 #include <QWidget>
 #include <QPropertyAnimation>
@@ -43,11 +45,13 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
+        // Track
         QColor trackColor = m_active ? QColor(0x3a, 0x7a, 0x52) : QColor(0x2e, 0x2e, 0x2e);
         p.setBrush(trackColor);
         p.setPen(Qt::NoPen);
         p.drawRoundedRect(0, 0, 72, 40, 20, 20);
 
+        // Thumb
         p.setBrush(Qt::white);
         p.drawEllipse(QRectF(m_offset, 4, 32, 32));
     }

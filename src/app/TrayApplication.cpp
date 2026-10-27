@@ -19,7 +19,7 @@ TrayApplication::TrayApplication(int& argc, char** argv)
 {
     setQuitOnLastWindowClosed(false);
     setApplicationName("PktSwerve");
-    setApplicationVersion("1.0.3");
+    setApplicationVersion("1.0.2");
     setOrganizationName("PktSwerve");
 
     const QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);

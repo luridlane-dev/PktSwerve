@@ -85,7 +85,9 @@ bool WinDivertBackend::start(const BypassConfig& config)
     connect(m_worker, &WinDivertWorker::statsUpdated,
             this,     &WinDivertBackend::statsUpdated);
     connect(m_worker, &WinDivertWorker::finished, this, [this, worker, generation]() {
-        // Ignore a previous worker's delayed finished signal after a restart.
+        // A stop/start sequence can queue the previous worker's finished
+        // signal until after the replacement worker has started.  Ignore
+        // stale completions so they cannot tear down the new worker state.
         if (generation != m_workerGeneration || m_worker != worker) {
             LOG_DEBUG0("Ignoring stale WinDivertWorker finished signal");
             return;
@@ -198,7 +200,9 @@ void WinDivertWorker::run()
     if (m_config.fragmentHttpRequests)
         tcpPorts << "tcp.DstPort == 80";
     if (m_config.fragmentHttpsPersist) {
-        // Keep pending port-443 flows intact until ClientHello reassembly finishes.
+        // A ClientHello can span multiple TCP segments. Capture the complete
+        // port-443 flow so the continuation can be reassembled below; packets
+        // that do not belong to a pending ClientHello are reinjected unchanged.
         tcpPorts << "tcp.DstPort == 443";
     }
 
@@ -212,12 +216,16 @@ void WinDivertWorker::run()
                            .arg(tcpConditions);
     }
 
-    // Only global mode blocks UDP/443; selected sites must not affect other traffic.
+    // QUIC encrypts the hostname before this layer can reliably inspect it.
+    // In selected-sites mode, dropping every UDP/443 packet is a global
+    // intervention and makes unrelated applications fall back or fail.
+    // Retain the old TCP-fallback behavior only for explicit Global mode.
     if (m_config.mode == BypassMode::GlobalMode) {
         filters << "(outbound and udp and udp.DstPort == 443)";
         filters << "(outbound and ipv6 and udp and udp.DstPort == 443)";
     }
 
+    // DNS redirect - IPv4 + IPv6
     if (m_config.dnsRedirect) {
         filters << "(outbound and udp and udp.DstPort == 53)";
         filters << "(outbound and ipv6 and udp and udp.DstPort == 53)";
@@ -428,6 +436,9 @@ void WinDivertWorker::run()
                 }
             }
 
+            // -------------------------------------------------------------------
+            // UDP - DNS redirect (IPv4 + IPv6)
+            // -------------------------------------------------------------------
         } else if (udp && m_config.dnsRedirect) {
 
             if (addr.Outbound) {
@@ -673,7 +684,8 @@ bool WinDivertWorker::redirectDnsOutbound(
         newUdp->DstPort = htons(static_cast<uint16_t>(m_config.dnsPort));
     } else {
         if (dnsAddr.protocol() != QAbstractSocket::IPv6Protocol) {
-            // IPv4-mapped IPv6 resolver addresses are not routable IPv6 targets.
+            // Do not turn an IPv4 resolver into an IPv4-mapped IPv6 target.
+            // That destination is usually unroutable and breaks IPv6 DNS.
             LOG_WARN("DNS redirect: IPv6 query with IPv4 resolver %1; forwarding original packet",
                      m_config.dnsServer);
             return false;

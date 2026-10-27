@@ -18,8 +18,9 @@ struct BypassConfig {
     bool fragmentHttpsPersist  = true;
     bool nativeFrag            = true;
     bool reverseFrag           = false;
+    bool tlsRecordSplit        = false; // macOS proxy backend: split the TLS record at the SNI
 
-    bool wrongChecksum         = false;
+    bool wrongChecksum        = false;
     bool wrongSeq              = false;
     bool fakePackets           = true;
 

@@ -48,6 +48,7 @@ private:
     QCheckBox*    m_wrongChecksum;
     QCheckBox*    m_wrongSeq;
     QCheckBox*    m_reverseFrag;
+    QCheckBox*    m_tlsRecSplit = nullptr; // macOS only
     QCheckBox*    m_fakePackets;
     QSpinBox*     m_httpFragSize;
     QSpinBox*     m_httpsFragSize;

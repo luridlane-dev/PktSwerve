@@ -185,7 +185,8 @@ DnsProbeReport probe(const QHostAddress& server, quint16 port,
         return report;
     }
 
-    // Retry transient UDP loss without exceeding the target timeout.
+    // UDP loss is transient on some networks. Retry each independent query,
+    // while keeping the total wait for a target within the original timeout.
     constexpr int kAttempts = 3;
     const int attemptTimeout = qMax(500, timeoutMs / kAttempts);
     for (const DnsProbeTarget& target : targets) {

@@ -1,5 +1,7 @@
 #include "PopupWindow.h"
+#ifdef Q_OS_WIN
 #include <windows.h>
+#endif
 #include "core/BypassEngine.h"
 #include "app/ToggleSwitch.h"
 #include "app/Logger.h"

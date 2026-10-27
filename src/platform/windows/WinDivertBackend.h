@@ -34,6 +34,9 @@ struct DnsState {
 
 class WinDivertWorker;
 
+// ---------------------------------------------------------------------------
+// WinDivertBackend
+// ---------------------------------------------------------------------------
 class WinDivertBackend : public IPlatformBackend {
     Q_OBJECT
 public:
@@ -55,6 +58,9 @@ private:
     quint64            m_workerGeneration = 0;
 };
 
+// ---------------------------------------------------------------------------
+// WinDivertWorker
+// ---------------------------------------------------------------------------
 class WinDivertWorker : public QObject {
     Q_OBJECT
 public:
@@ -105,7 +111,10 @@ private:
     std::atomic<bool>   m_stopRequested { false };
     std::atomic<HANDLE> m_handle        { nullptr };
 
-    // Include the transaction ID and address family to avoid source-port collisions.
+    // A resolver may issue several DNS requests from one UDP source port.
+    // The key therefore includes the DNS transaction ID and address family;
+    // indexing by source port alone can rewrite a reply with another query's
+    // original destination.
     QMap<quint64, DnsState> m_dnsState;
 
     static constexpr uint32_t MAX_PACKET_SIZE = 65535;

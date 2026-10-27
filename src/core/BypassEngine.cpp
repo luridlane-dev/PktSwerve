@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QStandardPaths>
 #include <QDir>
+#include <QFileInfo>
 #include <QSettings>
 #include <QTextStream>
 
@@ -26,6 +27,30 @@ QString configPath()
 #  include "platform/linux/NFQueueBackend.h"
 #elif defined(PLATFORM_MACOS)
 #  include "platform/mac/PfBackend.h"
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
+
+#ifdef PLATFORM_MACOS
+namespace {
+
+// The elevated instance runs as root with HOME pointing at the real user's
+// home (see PfBackend::requestPrivilegeElevation), so this resolves to the
+// user's LaunchAgents folder. launchd refuses agents not owned by the user,
+// hence the chown helpers below.
+QString launchAgentPath()
+{
+    return QDir::homePath() + "/Library/LaunchAgents/com.pktswerve.app.plist";
+}
+
+void chownLikeHome(const QString& path)
+{
+    struct stat st{};
+    if (stat(QDir::homePath().toUtf8().constData(), &st) == 0)
+        chown(path.toUtf8().constData(), st.st_uid, st.st_gid);
+}
+
+}
 #endif
 
 
@@ -204,7 +229,8 @@ void BypassEngine::loadConfig()
     m_config.wrongSeq             = obj["wrongSeq"].toBool(false);
     m_config.nativeFrag           = obj["nativeFrag"].toBool(true);
     m_config.reverseFrag          = obj["reverseFrag"].toBool(false);
-    m_config.fakePackets          = obj["fakePackets"].toBool(true);
+    m_config.tlsRecordSplit       = obj["tlsRecordSplit"].toBool(false);
+    m_config.fakePackets         = obj["fakePackets"].toBool(true);
     m_config.httpFragmentSize     = obj["httpFragmentSize"].toInt(2);
     m_config.httpsFragmentSize    = obj["httpsFragmentSize"].toInt(2);
     m_config.fakePacketTTL        = obj["fakePacketTTL"].toInt(8);
@@ -242,7 +268,8 @@ void BypassEngine::saveConfig()
     obj["wrongSeq"]              = m_config.wrongSeq;
     obj["nativeFrag"]            = m_config.nativeFrag;
     obj["reverseFrag"]           = m_config.reverseFrag;
-    obj["fakePackets"]           = m_config.fakePackets;
+    obj["tlsRecordSplit"]        = m_config.tlsRecordSplit;
+    obj["fakePackets"]          = m_config.fakePackets;
     obj["httpFragmentSize"]      = m_config.httpFragmentSize;
     obj["httpsFragmentSize"]     = m_config.httpsFragmentSize;
     obj["fakePacketTTL"]         = m_config.fakePacketTTL;
@@ -274,6 +301,8 @@ bool BypassEngine::autoStart() const
     QString cmd = "schtasks /Query /TN \"PktSwerve\" >nul 2>&1";
     int ret = system(cmd.toStdString().c_str());
     return (ret == 0);
+#elif defined(PLATFORM_MACOS)
+    return QFile::exists(launchAgentPath());
 #else
     return false;
 #endif
@@ -306,6 +335,40 @@ void BypassEngine::setupAutoStart(bool enabled)
         QString cmd = QString("schtasks /Delete /F /TN \"%1\"").arg(taskName);
         _wsystem(reinterpret_cast<const wchar_t*>(cmd.utf16()));
         LOG_INFO0("AutoStart task deleted");
+    }
+#elif defined(PLATFORM_MACOS)
+    const QString plistPath = launchAgentPath();
+    if (enabled) {
+        const QString dirPath = QFileInfo(plistPath).absolutePath();
+        const bool dirExisted = QDir(dirPath).exists();
+        QDir().mkpath(dirPath);
+
+        const QString exePath = QCoreApplication::applicationFilePath().toHtmlEscaped();
+        QFile f(plistPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            LOG_ERROR("Failed to write LaunchAgent: %1", plistPath);
+            return;
+        }
+        f.write(QString(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\">\n<dict>\n"
+            "  <key>Label</key><string>com.pktswerve.app</string>\n"
+            "  <key>ProgramArguments</key><array><string>%1</string></array>\n"
+            "  <key>RunAtLoad</key><true/>\n"
+            "</dict>\n</plist>\n").arg(exePath).toUtf8());
+        f.close();
+
+        // Running elevated => we created these as root; hand them back to the user.
+        if (geteuid() == 0) {
+            if (!dirExisted) chownLikeHome(dirPath);
+            chownLikeHome(plistPath);
+        }
+        LOG_INFO("AutoStart LaunchAgent created: %1", plistPath);
+    } else {
+        QFile::remove(plistPath);
+        LOG_INFO0("AutoStart LaunchAgent deleted");
     }
 #endif
 }
