@@ -1,0 +1,42 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.*'
+          cache: true
+
+      - name: Configure (universal: Apple Silicon + Intel)
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Bundle Qt into the app and ad-hoc sign it
+        run: |
+          macdeployqt build/PktSwerve.app
+          codesign --force --deep --sign - build/PktSwerve.app
+
+      - name: Zip
+        run: ditto -c -k --keepParent build/PktSwerve.app PktSwerve-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PktSwerve-macOS
+          path: PktSwerve-macOS.zip

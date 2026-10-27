@@ -1,5 +1,6 @@
 
 #include <QApplication>
+#include <QIcon>
 #include "app/TrayApplication.h"
 #include "app/Logger.h"
 
@@ -14,6 +15,7 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS*)
 }
 #endif
 
+#ifdef PLATFORM_WINDOWS
 namespace {
 
 bool isRunningElevated()
@@ -48,6 +50,7 @@ bool relaunchElevated()
 }
 
 } // namespace
+#endif
 
 int main(int argc, char* argv[]) {
 #ifdef PLATFORM_WINDOWS

@@ -111,6 +111,14 @@ if(WIN32)
     set_target_properties(PktSwerve PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 
+if(APPLE)
+    # Menu bar app (LSUIElement) with a stable bundle identifier.
+    set_target_properties(PktSwerve PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER com.pktswerve.app
+        MACOSX_BUNDLE_INFO_PLIST     ${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Info.plist.in
+    )
+endif()
+
 
 include(GNUInstallDirs)
 install(TARGETS PktSwerve

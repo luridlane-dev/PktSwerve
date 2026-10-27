@@ -11,5 +11,4 @@
 /compile_commands.json
 /vendor/windivert/
 /src/platform/linux/
-/src/platform/mac/
 /tools
