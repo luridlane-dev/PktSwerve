@@ -18,7 +18,7 @@ jobs:
           version: '6.8.*'
           cache: true
 
-      - name: Configure (universal: Apple Silicon + Intel)
+      - name: Configure (universal, Apple Silicon + Intel)
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
