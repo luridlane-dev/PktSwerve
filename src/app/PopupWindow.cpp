@@ -2,6 +2,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
+#include <cstdlib>
 #include "core/BypassEngine.h"
 #include "app/ToggleSwitch.h"
 #include "app/Logger.h"
@@ -403,6 +404,11 @@ void PopupWindow::onQuitClicked()
         m_engine->stop();
     }
 
+#ifdef Q_OS_WIN
     ::TerminateProcess(::GetCurrentProcess(), 0);
+#else
+    // Same hard exit as on Windows; the engine (and its pf rules) is already stopped.
+    std::_Exit(0);
+#endif
 }
 
