@@ -8,6 +8,12 @@
     <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
     <key>CFBundleName</key>
     <string>PktSwerve</string>
+    <key>CFBundleDisplayName</key>
+    <string>PktSwerve</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

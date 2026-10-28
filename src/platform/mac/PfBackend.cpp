@@ -26,19 +26,16 @@
 #include <cstring>
 #include <thread>
 
-// -----------------------------------------------------------------------
-// Shared state.  Held by the worker, the backend and every connection
-// thread, so it outlives whichever of them finishes last.
-// -----------------------------------------------------------------------
+// State shared by the worker, the backend and all connection threads.
 struct PfShared {
     BypassConfig cfg;
     std::atomic<bool>    stop{false};
     std::atomic<int>     active{0};
     std::atomic<quint64> conns{0};
     std::atomic<quint64> bytes{0};
-    int pfFd      = -1;      // /dev/pf, used for DIOCNATLOOK
-    int dnsFd     = -1;      // UDP listener; replies must leave from this socket
-    int wakeFd[2] = {-1, -1}; // self-pipe to wake poll() on stop
+    int pfFd      = -1;       // /dev/pf, for DIOCNATLOOK
+    int dnsFd     = -1;       // UDP listener; replies must leave from it
+    int wakeFd[2] = {-1, -1}; // self-pipe that wakes poll() on stop
 
     ~PfShared() {
         for (int fd : {pfFd, dnsFd, wakeFd[0], wakeFd[1]})
@@ -57,21 +54,19 @@ struct PfShared {
 
 namespace {
 
-// Our pf rules live in "com.apple/250.PktSwerve.<pid>".  "com.apple/*" is
-// already evaluated by the stock /etc/pf.conf, so the system ruleset is never
-// edited; the pid suffix lets a new instance tell its rules from a dead one's.
+// Rules go into "com.apple/250.PktSwerve.<pid>". The stock pf.conf already
+// evaluates "com.apple/*", so the system ruleset is never edited. The pid
+// lets a new instance tell its anchor from a dead one's.
 const QString kAnchorParent = QStringLiteral("com.apple");
 const QString kAnchorName   = QStringLiteral("250.PktSwerve");
 const QString kPfctl        = QStringLiteral("/sbin/pfctl");
 
-constexpr int kMaxConnections = 800;   // two threads and two fds each
+constexpr int kMaxConnections   = 1000;   // one thread and two fds each
 constexpr int kConnectTimeoutMs = 10000;
+constexpr int kRelayBufferSize  = 16384;
+constexpr int kDnsReplySize     = 8192;
 
-// -----------------------------------------------------------------------
-// pf: original destination lookup
-// -----------------------------------------------------------------------
-// net/pfvar.h is not part of the public macOS SDK, so the layout of
-// struct pfioc_natlook (xnu bsd/net/pfvar.h) is mirrored here.
+// net/pfvar.h is not in the public SDK; this mirrors xnu's struct pfioc_natlook.
 struct PfAddr {
     union {
         in_addr  v4;
@@ -99,8 +94,7 @@ static_assert(sizeof(PfNatLook) == 84, "pfioc_natlook layout drifted; DIOCNATLOO
 constexpr uint8_t kPfOut = 2;                       // enum { PF_INOUT, PF_IN, PF_OUT }
 #define PKT_DIOCNATLOOK _IOWR('D', 23, PfNatLook)
 
-// `client` is the redirected peer, `local` the proxy socket it reached.
-// On success `orig` holds the address the application really dialled.
+// Finds the address the client originally dialled; `local` is the proxy socket it reached.
 bool natLookup(int pfFd, int proto, const sockaddr_in& client,
                const sockaddr_in& local, sockaddr_in& orig)
 {
@@ -124,9 +118,6 @@ bool natLookup(int pfFd, int proto, const sockaddr_in& client,
     return true;
 }
 
-// -----------------------------------------------------------------------
-// Small socket helpers
-// -----------------------------------------------------------------------
 struct Fd {
     int fd;
     explicit Fd(int f = -1) : fd(f) {}
@@ -180,9 +171,7 @@ int makeListener(int type, int port, QString* error)
     return fd;
 }
 
-// Connects to `dst` from a root-owned socket.  pf skips root's traffic
-// (see buildRules), so the proxy's own connections are never redirected
-// back into itself.
+// Runs as root, which the pf rules skip, so this never loops back into the proxy.
 int connectTo(const sockaddr_in& dst, int timeoutMs)
 {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -223,8 +212,7 @@ bool sendAll(int fd, const char* data, size_t len)
     return true;
 }
 
-// Writes `data` as separate send() calls cut at the given offsets.  With
-// TCP_NODELAY set every call leaves as its own segment.
+// One send() per chunk; with TCP_NODELAY each leaves as its own segment.
 bool sendChunks(int fd, const QByteArray& data, QList<int> cuts)
 {
     std::sort(cuts.begin(), cuts.end());
@@ -238,38 +226,91 @@ bool sendChunks(int fd, const QByteArray& data, QList<int> cuts)
     return sendAll(fd, data.constData() + start, static_cast<size_t>(data.size() - start));
 }
 
-// Copies one direction until EOF, error or shutdown.  A clean EOF is passed
-// on as a half-close so the other direction can finish; anything else tears
-// both sockets down so the sibling pump wakes up.
-void pump(PfShared& sh, int from, int to)
-{
-    char buf[16384];
-    bool clean = false;
-    while (!sh.stop) {
-        pollfd p{from, POLLIN, 0};
-        const int r = ::poll(&p, 1, 500);
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) continue;
+bool wouldBlock(int err) { return err == EAGAIN || err == EWOULDBLOCK || err == EINTR; }
+
+// One direction of a relay: data read from `from` waits in `buf` until it is
+// fully written to `to`.
+struct Lane {
+    int     from;
+    int     to;
+    char    buf[kRelayBufferSize];
+    ssize_t len = 0;
+    ssize_t off = 0;
+    bool    eof = false;
+    bool    halfClosed = false;
+
+    bool pending() const   { return off < len; }
+    bool wantsRead() const { return !eof && !pending(); }
+    bool done() const      { return eof && !pending(); }
+
+    // False on a socket error.
+    bool read()
+    {
         const ssize_t n = ::recv(from, buf, sizeof(buf), 0);
-        if (n == 0) { clean = true; break; }
-        if (n < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
-        if (!sendAll(to, buf, static_cast<size_t>(n))) break;
-        sh.bytes += static_cast<quint64>(n);
+        if (n > 0) { len = n; off = 0; return true; }
+        if (n == 0) { eof = true; return true; }
+        return wouldBlock(errno);
     }
-    if (clean) {
-        ::shutdown(to, SHUT_WR);
-    } else {
-        ::shutdown(from, SHUT_RDWR);
-        ::shutdown(to, SHUT_RDWR);
+
+    bool flush(std::atomic<quint64>& bytes)
+    {
+        while (pending()) {
+            const ssize_t w = ::send(to, buf + off, static_cast<size_t>(len - off), 0);
+            if (w < 0) return wouldBlock(errno);
+            off += w;
+            bytes += static_cast<quint64>(w);
+        }
+        len = off = 0;
+        return true;
+    }
+};
+
+// Copies both directions on the calling thread until each side has closed or
+// failed. A clean EOF is passed on as a half-close.
+void relay(PfShared& sh, int a, int b)
+{
+    setBlocking(a, false);
+    setBlocking(b, false);
+
+    Lane lanes[2] = {{a, b}, {b, a}};
+    while (!sh.stop && !(lanes[0].done() && lanes[1].done())) {
+        auto events = [&](const Lane& reads, const Lane& writes) -> short {
+            return (reads.wantsRead() ? POLLIN : 0) | (writes.pending() ? POLLOUT : 0);
+        };
+        pollfd fds[2] = {{a, events(lanes[0], lanes[1]), 0}, {b, events(lanes[1], lanes[0]), 0}};
+
+        const int r = ::poll(fds, 2, 500);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+
+        for (int i = 0; i < 2; ++i) {
+            const short re = fds[i].revents;
+            if ((re & (POLLERR | POLLNVAL)) || ((re & POLLHUP) && !fds[i].events))
+                return;
+            Lane& reads  = lanes[i];        // reads from fds[i]
+            Lane& writes = lanes[1 - i];    // writes to fds[i]
+            if ((re & POLLOUT) && !writes.flush(sh.bytes))
+                return;
+            if ((re & (POLLIN | POLLHUP)) && reads.wantsRead()) {
+                if (!reads.read() || !reads.flush(sh.bytes))
+                    return;
+            }
+        }
+
+        for (Lane& lane : lanes) {
+            if (lane.done() && !lane.halfClosed) {
+                ::shutdown(lane.to, SHUT_WR);
+                lane.halfClosed = true;
+            }
+        }
     }
 }
 
-// -----------------------------------------------------------------------
-// First flight handling
-// -----------------------------------------------------------------------
-// Waits for the client's first bytes.  For TLS keeps reading until the whole
-// first record is in, so the SNI can be parsed even if the ClientHello
-// arrived in several segments.  Returns false if there is nothing to forward.
+// Waits for the client's first bytes. For TLS it keeps reading until the
+// whole first record is in, so the SNI is found even when the ClientHello
+// spans several segments. False means there is nothing to forward.
 bool readFirstFlight(PfShared& sh, int fd, bool tls, QByteArray& out)
 {
     char buf[16384];
@@ -416,9 +457,6 @@ bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int ups
     return sendChunks(upstreamFd, data, cuts);
 }
 
-// -----------------------------------------------------------------------
-// One redirected TCP connection
-// -----------------------------------------------------------------------
 void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
 {
     Fd client(clientFd);
@@ -457,15 +495,9 @@ void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
         return;
     sh->bytes += static_cast<quint64>(first.size());
 
-    PfShared* state = sh.get();
-    std::thread reverse([state, &upstream, clientFd] { pump(*state, upstream.fd, clientFd); });
-    pump(*state, clientFd, upstream.fd);
-    reverse.join();
+    relay(*sh, clientFd, upstream.fd);
 }
 
-// -----------------------------------------------------------------------
-// One redirected DNS query
-// -----------------------------------------------------------------------
 void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, const sockaddr_in& client)
 {
     const BypassConfig& cfg = sh->cfg;
@@ -518,18 +550,17 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
     do { r = ::poll(&p, 1, 3000); } while (r < 0 && errno == EINTR);
     if (r <= 0) return;
 
-    QByteArray reply(65535, '\0');
-    const ssize_t n = ::recv(s.fd, reply.data(), static_cast<size_t>(reply.size()), 0);
+    char reply[kDnsReplySize];
+    const ssize_t n = ::recv(s.fd, reply, sizeof(reply), 0);
     if (n <= 0) return;
 
-    // The reply must come from the socket pf redirected the query to, so
-    // pf can rewrite the source back to the resolver the application used.
-    ::sendto(sh->dnsFd, reply.constData(), static_cast<size_t>(n), 0,
+    // Must leave from the redirected socket so pf can restore the resolver's address as source.
+    ::sendto(sh->dnsFd, reply, static_cast<size_t>(n), 0,
              reinterpret_cast<const sockaddr*>(&client), sizeof(client));
     sh->bytes += static_cast<quint64>(n);
 }
 
-// Runs `fn` on a detached thread that keeps the shared state alive.
+// Runs `fn` on a detached thread that keeps `sh` alive.
 template <typename Fn>
 bool spawn(const std::shared_ptr<PfShared>& sh, Fn fn)
 {
@@ -580,9 +611,6 @@ void receiveDnsQueries(const std::shared_ptr<PfShared>& sh)
     }
 }
 
-// -----------------------------------------------------------------------
-// pfctl
-// -----------------------------------------------------------------------
 struct PfctlResult {
     bool    ok;
     QString output;
@@ -606,11 +634,9 @@ PfctlResult runPfctl(const QStringList& args, const QByteArray& input = {})
             QString::fromLocal8Bit(p.readAll()).trimmed()};
 }
 
-// Redirect rules mirror zapret's tpws setup for macOS:
-//  * outgoing packets are routed onto lo0, where the rdr rule hands them to the proxy;
-//  * `user { >root }` exempts root, which is what the proxy itself runs as,
-//    so its upstream connections go out directly (and root's own traffic is not bypassed);
-//  * `from !127.0.0.0/8` keeps genuine loopback traffic out of it.
+// Same idea as zapret's tpws setup: outgoing packets are routed onto lo0 and
+// the rdr rule hands them to the proxy. `user { >root }` exempts the proxy's
+// own (root) connections, and `from !127.0.0.0/8` keeps real loopback out.
 QByteArray buildRules(const BypassConfig& c)
 {
     QStringList trans, filter;
@@ -625,9 +651,7 @@ QByteArray buildRules(const BypassConfig& c)
     if (c.fragmentHttpsPersist) redirect("tcp", 443, PfPorts::Https);
     if (c.dnsRedirect)          redirect("udp", 53,  PfPorts::Dns);
 
-    // The proxy is IPv4-only.  On IPv6 networks the same connections would
-    // simply go around it, so refuse them with an immediate reset/unreachable;
-    // browsers and mDNSResponder then fall back to IPv4 within milliseconds.
+    // The proxy is IPv4-only: refuse IPv6 so clients fall back to IPv4 at once.
     auto refuseIpv6 = [&](const QString& proto, int port) {
         filter.prepend(QString("block return out quick inet6 proto %1 from any to any port %2 user { >root }")
                            .arg(proto).arg(port));
@@ -636,8 +660,7 @@ QByteArray buildRules(const BypassConfig& c)
     if (c.fragmentHttpsPersist) refuseIpv6("tcp", 443);
     if (c.dnsRedirect)          refuseIpv6("udp", 53);
 
-    // Same policy as the Windows backend: QUIC hides the SNI, so in Global
-    // mode it is dropped and browsers fall back to TCP.  Applies to both IPv4 and IPv6.
+    // QUIC hides the SNI, so Global mode drops it (as on Windows) and browsers fall back to TCP.
     if (c.mode == BypassMode::GlobalMode)
         filter.prepend("block drop out quick proto udp from any to any port 443");
 
@@ -646,9 +669,6 @@ QByteArray buildRules(const BypassConfig& c)
 
 } // namespace
 
-// -----------------------------------------------------------------------
-// PfBackend
-// -----------------------------------------------------------------------
 PfBackend::PfBackend(QObject* parent)
     : IPlatformBackend(parent)
     , m_anchor(QString("%1/%2.%3").arg(kAnchorParent, kAnchorName).arg(getpid()))
@@ -666,17 +686,15 @@ bool PfBackend::requestPrivilegeElevation()
     auto shellQuote = [](QString s) { s.replace("'", "'\\''"); return "'" + s + "'"; };
     auto asQuote    = [](QString s) { s.replace("\\", "\\\\").replace("\"", "\\\""); return s; };
 
-    // Relaunch as root.  HOME is pinned to the real user's home so the elevated
-    // instance reads the same config/log folders; the trailing '&' lets
-    // osascript return as soon as the app is launched.
+    // HOME is pinned so the root instance uses the user's config and log folders.
+    // The trailing '&' lets osascript return once the app is launched.
     const QString command = QString("HOME=%1 %2 >/dev/null 2>&1 &")
                                 .arg(shellQuote(QDir::homePath()),
                                      shellQuote(QCoreApplication::applicationFilePath()));
     const QString script = QString("do shell script \"%1\" with administrator privileges")
                                .arg(asQuote(command));
 
-    // Wait for the password prompt: osascript exits non-zero when the user
-    // cancels, and in that case this instance must keep running.
+    // osascript exits non-zero when the prompt is cancelled; this instance then keeps running.
     QProcess p;
     p.start("/usr/bin/osascript", {"-e", script});
     if (!p.waitForStarted(5000))
@@ -688,9 +706,9 @@ bool PfBackend::requestPrivilegeElevation()
     return ok;
 }
 
-// Rules of an instance that died without stopping keep redirecting web
-// traffic to a closed port.  Remove every PktSwerve anchor whose process is
-// gone (including the fixed-name anchor used by earlier builds).
+// Rules left by a dead instance would redirect web traffic to a closed port.
+// Removes every PktSwerve anchor whose process is gone, including the
+// fixed-name anchor of earlier builds.
 void PfBackend::clearStaleAnchors()
 {
     static const QRegularExpression re(
@@ -710,9 +728,8 @@ void PfBackend::clearStaleAnchors()
     }
 }
 
-// Detached root shell that waits for this process to exit and then removes
-// our rules and pf reference.  Covers crashes and force-quits; a normal stop
-// kills it first and cleans up itself.
+// Detached root shell that removes our rules and pf reference once this
+// process is gone, so a crash or force-quit cannot leave them behind.
 void PfBackend::startWatchdog()
 {
     QString script = QString("while kill -0 %1 2>/dev/null; do sleep 2; done; "
@@ -746,8 +763,7 @@ bool PfBackend::fail(const QString& message)
 
 bool PfBackend::setupPf(const BypassConfig& config)
 {
-    // -E takes a reference on pf instead of just switching it on, so other
-    // users of pf (and macOS itself) are left alone when we release it.
+    // -E takes a reference, so other pf users are unaffected when we release it.
     const PfctlResult enable = runPfctl({"-E"});
     if (!enable.ok)
         return fail("Could not enable pf: " + enable.output);
@@ -794,13 +810,13 @@ bool PfBackend::start(const BypassConfig& config)
         delete worker;
         return fail(error);
     }
-    // Listeners are up; only now is it safe to send traffic their way.
+    // Redirect only after the listeners are up.
     if (!setupPf(config)) {
         delete worker;
         return false;
     }
     if (config.dnsRedirect) {
-        // Answers cached before the redirect was active may be the poisoned ones.
+        // Drop answers cached before the redirect started.
         QProcess::startDetached("/usr/bin/dscacheutil", {"-flushcache"});
         QProcess::startDetached("/usr/bin/killall", {"-HUP", "mDNSResponder"});
     }
@@ -819,8 +835,7 @@ bool PfBackend::start(const BypassConfig& config)
     connect(worker, &PfWorker::errorOccurred,  this,   &PfBackend::errorOccurred);
     connect(worker, &PfWorker::statsUpdated,   this,   &PfBackend::statsUpdated);
     connect(worker,   &PfWorker::finished, this, [this, generation]() {
-        // A stop()/start() sequence can deliver the old worker's signal after
-        // the new one is running; ignore it.
+        // Ignore a late signal from a previous worker.
         if (generation != m_workerGeneration) return;
         LOG_INFO0("PfWorker finished - backend marked stopped");
         clearPf();
@@ -841,7 +856,7 @@ bool PfBackend::stop()
     if (!m_running) return true;
 
     LOG_INFO0("PfBackend stopping");
-    clearPf();                                  // stop steering traffic at us first
+    clearPf();   // stop steering traffic at us first
     if (m_state) m_state->requestStop();
     if (m_thread && m_thread->isRunning() && !m_thread->wait(5000))
         LOG_WARN0("PfWorker thread did not stop within 5s");
@@ -852,9 +867,6 @@ bool PfBackend::stop()
 bool    PfBackend::isRunning() const { return m_running; }
 QString PfBackend::lastError() const { return m_lastError; }
 
-// -----------------------------------------------------------------------
-// PfWorker
-// -----------------------------------------------------------------------
 PfWorker::PfWorker(QObject* parent) : QObject(parent), m_shared(std::make_shared<PfShared>()) {}
 
 PfWorker::~PfWorker() { closeListeners(); }
@@ -872,8 +884,7 @@ bool PfWorker::prepare(QString* error)
 {
     PfShared& sh = *m_shared;
 
-    // The default soft limit is 256 descriptors, which a handful of browser
-    // tabs would exhaust (every connection needs two).
+    // The default limit of 256 fds is gone after a few tabs (two per connection).
     rlimit rl{};
     if (::getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         const rlim_t wanted = std::min<rlim_t>(rl.rlim_max, 10240);
@@ -948,7 +959,7 @@ void PfWorker::run()
     sh->stop = true;
     closeListeners();
 
-    // Connection threads notice `stop` within ~500 ms.
+    // Connection threads see `stop` within ~500 ms.
     for (int i = 0; i < 40 && sh->active > 0; ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     if (sh->active > 0)

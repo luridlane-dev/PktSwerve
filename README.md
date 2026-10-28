@@ -8,7 +8,9 @@ PktSwerve is a Windows desktop tray application that applies packet-level techni
 
 ## Current status
 
-The supported target is 64-bit Windows. The current backend uses WinDivert. The repository contains platform hooks for other operating systems, but their backends are not included in the current source tree, so macOS, Linux, and Android are not supported by this build.
+- **Windows 10/11 (64-bit):** WinDivert backend, packet-level techniques.
+- **macOS 12+ (Apple Silicon and Intel):** menu bar app. A pf redirect rule sends HTTP, HTTPS and DNS traffic to a local proxy that splits the first packet (and optionally the TLS record) before forwarding it. Reordering and fake packets are not available there. Requires administrator permission, asked on first start.
+- Linux and Android are not supported.
 
 ## Features
 

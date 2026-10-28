@@ -1,18 +1,12 @@
-// PopupWindow.h
-
 #pragma once
+#include <QPixmap>
 #include <QWidget>
-#include <QLabel>
-
-#include <QPainter>
-#include <QPropertyAnimation>
-#include <QMouseEvent>
-#include "ToggleSwitch.h"
 
 class BypassEngine;
-
-class ToggleSwitch;
+class QGraphicsOpacityEffect;
 class QLabel;
+class QPropertyAnimation;
+class ToggleSwitch;
 
 class PopupWindow : public QWidget {
     Q_OBJECT
@@ -25,32 +19,26 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent*) override;
-    void focusOutEvent(QFocusEvent*) override;
     bool eventFilter(QObject*, QEvent*) override;
-
-private slots:
-    void onToggleClicked();
-    void onEngineStarted();
-    void onEngineStopped();
-    void onEngineError(const QString&);
-    void onStatsUpdated(quint64, quint64);
-    void onSettingsClicked();
-    void onQuitClicked();
 
 private:
     void buildUi();
     void updateState();
+    void applyState();
+    void setStatus(const QString& state, const QString& text);
+    void onToggleClicked();
+    void onEngineError(const QString& message);
+    void onQuitClicked();
 
-    BypassEngine*  m_engine;
-    ToggleSwitch*  m_toggleBtn   = nullptr;
-    QLabel*        m_statusLabel = nullptr;
-    QLabel*        m_dnsLabel    = nullptr;
-    QLabel*        m_logoLabel   = nullptr;
-    int            m_elapsedSec  = 0;
-
-    void applyVisualUpdates(bool running);
-
-    bool m_isAnimating = false;
-    bool m_hasPendingState = false;
-    bool m_pendingState = false;
+    BypassEngine*           m_engine;
+    ToggleSwitch*           m_toggle      = nullptr;
+    QWidget*                m_hero        = nullptr;
+    QLabel*                 m_logoLabel   = nullptr;
+    QLabel*                 m_statusLabel = nullptr;
+    QLabel*                 m_dnsValue    = nullptr;
+    QLabel*                 m_modeValue   = nullptr;
+    QGraphicsOpacityEffect* m_heroFade    = nullptr;
+    QPropertyAnimation*     m_fade        = nullptr;
+    QPixmap                 m_activeLogo;
+    QPixmap                 m_idleLogo;
 };

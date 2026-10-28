@@ -4,13 +4,13 @@
 class BypassEngine;
 struct BypassConfig;
 
-class QTabWidget;
 class QCheckBox;
-class QSpinBox;
-class QLineEdit;
-class QTextEdit;
 class QComboBox;
+class QLineEdit;
 class QPushButton;
+class QSpinBox;
+class QTabWidget;
+class QTextEdit;
 class QWidget;
 
 class SettingsWindow : public QMainWindow {
@@ -21,7 +21,6 @@ public:
 private slots:
     void onApply();
     void onModeChanged(int index);
-
     void onDnsPresetSelected(int index);
     void onCheckConnectivity();
     void onResetDefaults();
@@ -36,35 +35,32 @@ private:
 
     void loadToUi(const BypassConfig& cfg);
     BypassConfig uiToConfig();
+    void runDnsProbe(bool restartEngine);
 
     BypassEngine* m_engine;
-    QTabWidget*   m_tabs;
+    QTabWidget*   m_tabs = nullptr;
 
-    QComboBox*    m_modeCombo;
-    QCheckBox*    m_autoStartCheck;
+    QComboBox*    m_modeCombo = nullptr;
+    QCheckBox*    m_autoStartCheck = nullptr;
 
-    QCheckBox*    m_fragHttp;
-    QCheckBox*    m_fragHttps;
-    QCheckBox*    m_wrongChecksum;
-    QCheckBox*    m_wrongSeq;
-    QCheckBox*    m_reverseFrag;
+    QCheckBox*    m_fragHttp = nullptr;
+    QCheckBox*    m_fragHttps = nullptr;
+    QCheckBox*    m_wrongChecksum = nullptr;
+    QCheckBox*    m_wrongSeq = nullptr;
+    QCheckBox*    m_reverseFrag = nullptr;
     QCheckBox*    m_tlsRecSplit = nullptr; // macOS only
-    QCheckBox*    m_fakePackets;
-    QSpinBox*     m_httpFragSize;
-    QSpinBox*     m_httpsFragSize;
-    QSpinBox*     m_fakeTTL;
+    QCheckBox*    m_fakePackets = nullptr;
+    QSpinBox*     m_httpFragSize = nullptr;
+    QSpinBox*     m_httpsFragSize = nullptr;
+    QSpinBox*     m_fakeTTL = nullptr;
 
-    QCheckBox*    m_dnsRedirect;
-    QLineEdit*    m_dnsServer;
-    QSpinBox*     m_dnsPort;
+    QCheckBox*    m_dnsRedirect = nullptr;
+    QLineEdit*    m_dnsServer = nullptr;
+    QSpinBox*     m_dnsPort = nullptr;
+    QComboBox*    m_dnsPresetCombo = nullptr;
+    QTextEdit*    m_dnsStatusLabel = nullptr;
+    QPushButton*  m_checkBtn = nullptr;
 
-    QComboBox*    m_dnsPresetCombo;
-    QTextEdit*    m_dnsStatusLabel;
-    QPushButton*  m_checkBtn;
-
-    QPushButton*  m_dnsTestBtn = nullptr;
-
-    QTextEdit*    m_blacklistEdit;
-
-    QWidget*      m_hostListWidget;
+    QTextEdit*    m_blacklistEdit = nullptr;
+    QWidget*      m_hostListWidget = nullptr;
 };

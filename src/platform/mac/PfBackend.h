@@ -10,19 +10,17 @@
 struct PfShared;
 class PfWorker;
 
-// macOS has no WinDivert/NFQUEUE equivalent, so this backend works at the
-// connection level instead of the packet level:
+// Connection-level backend (macOS has no packet divert API):
 //
-//   app --TCP 80/443--> pf (rdr via lo0) --> PfWorker proxy --> real server
+//   app --TCP 80/443--> pf (rdr via lo0) --> PfWorker proxy --> server
 //
-// The proxy reads the first flight (HTTP request / TLS ClientHello), decides
-// from the Host/SNI whether to bypass, and writes it to the server in several
-// TCP segments (and optionally as two TLS records).  DNS queries are caught
-// the same way and forwarded to the configured resolver.
+// The proxy reads the first flight (HTTP request or TLS ClientHello), checks
+// the Host/SNI and writes it out in several segments, optionally as two TLS
+// records. DNS queries are caught the same way and sent to the configured
+// resolver.
 //
-// pf rules live in a per-process anchor and are removed again on stop().
-// A small root watchdog removes them too if the app dies without stopping,
-// since stale redirect rules would break every web connection.
+// pf rules live in a per-process anchor, removed on stop(). A root watchdog
+// removes them if the app dies without stopping.
 namespace PfPorts {
 constexpr int Http  = 9876;
 constexpr int Https = 9877;
@@ -44,7 +42,7 @@ public:
 
 private:
     QPointer<QThread>         m_thread;
-    std::shared_ptr<PfShared> m_state;     // lets stop() reach the worker without a raw pointer
+    std::shared_ptr<PfShared> m_state;     // lets stop() reach the worker
     QString                   m_lastError;
     QString                   m_pfToken;   // reference token from `pfctl -E`
     QString                   m_anchor;    // per-process pf anchor
@@ -60,11 +58,8 @@ private:
     void stopWatchdog();
 };
 
-// -----------------------------------------------------------------------
-// PfWorker - owns the listening sockets and the accept loop.  Every
-// connection is handled on its own detached thread that shares state through
-// PfShared, so nothing touches the worker after it has been destroyed.
-// -----------------------------------------------------------------------
+// Owns the listening sockets and the accept loop. Each connection runs on its
+// own detached thread and shares state through PfShared, never the worker.
 class PfWorker : public QObject {
     Q_OBJECT
 public:
@@ -74,8 +69,7 @@ public:
     void setConfig(const BypassConfig& cfg);
     std::shared_ptr<PfShared> state() const { return m_shared; }
 
-    // Opens /dev/pf and binds the listeners.  Must succeed before pf rules
-    // are loaded, otherwise redirected connections would hit a closed port.
+    // Opens /dev/pf and binds the listeners; must succeed before pf rules load.
     bool prepare(QString* error);
 
 public slots:

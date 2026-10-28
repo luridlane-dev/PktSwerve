@@ -27,6 +27,12 @@ set(PROJECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/SettingsWindow.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/PopupWindow.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/PopupWindow.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Logger.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Logger.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/ToggleSwitch.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/ToggleSwitch.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/PacketUtils.h
@@ -55,10 +61,7 @@ elseif(UNIX)
 endif()
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
-    qt_add_executable(PktSwerve MANUAL_FINALIZATION ${PROJECT_SOURCES}
-        src/app/Logger.h src/app/Logger.cpp
-        src/app/ToggleSwitch.h
-    )
+    qt_add_executable(PktSwerve MANUAL_FINALIZATION ${PROJECT_SOURCES})
 else()
     if(ANDROID)
         add_library(PktSwerve SHARED ${PROJECT_SOURCES})
@@ -112,7 +115,10 @@ if(WIN32)
 endif()
 
 if(APPLE)
-    # Menu bar app (LSUIElement) with a stable bundle identifier.
+    set(MACOS_ICON ${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/AppIcon.icns)
+    target_sources(PktSwerve PRIVATE ${MACOS_ICON})
+    set_source_files_properties(${MACOS_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+
     set_target_properties(PktSwerve PROPERTIES
         MACOSX_BUNDLE_GUI_IDENTIFIER com.pktswerve.app
         MACOSX_BUNDLE_INFO_PLIST     ${CMAKE_CURRENT_SOURCE_DIR}/packaging/macos/Info.plist.in

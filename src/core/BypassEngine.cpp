@@ -181,8 +181,6 @@ bool BypassEngine::stop()
         return true;
     }
 
-    const bool wasRunning = m_backend->isRunning();
-
     bool ok = m_backend->stop();
 
     LOG_INFO("Backend stop returned: %1", ok ? "true" : "false");

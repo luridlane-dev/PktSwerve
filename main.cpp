@@ -3,6 +3,7 @@
 #include <QIcon>
 #include "app/TrayApplication.h"
 #include "app/Logger.h"
+#include "app/Theme.h"
 
 #ifdef PLATFORM_WINDOWS
 #include <windows.h>
@@ -62,11 +63,11 @@ int main(int argc, char* argv[]) {
 #endif
 
     TrayApplication app(argc, argv);
+    Theme::apply(app);
 
-    QIcon appIcon(":/icons/app.ico");
-    if (!appIcon.isNull()) {
+    const QIcon appIcon(":/icons/app.ico");
+    if (!appIcon.isNull())
         QApplication::setWindowIcon(appIcon);
-    }
 
     if (!app.init()) return 1;
     return app.exec();

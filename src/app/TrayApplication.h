@@ -2,11 +2,6 @@
 #include <QApplication>
 #include <QSystemTrayIcon>
 
-#ifdef Q_OS_WIN
-#include <windows.h>
-#include <cstdio>
-#endif
-
 class BypassEngine;
 class SettingsWindow;
 class PopupWindow;
@@ -29,7 +24,6 @@ private slots:
     void onEngineStarted();
     void onEngineStopped();
     void onEngineError(const QString& error);
-    void onStatsUpdated(quint64 packets, quint64 bytes);
 
 private:
     void buildTrayMenu();
@@ -42,5 +36,4 @@ private:
     BypassEngine*    m_engine         = nullptr;
     SettingsWindow*  m_settingsWindow = nullptr;
     PopupWindow*     m_popup          = nullptr;
-
 };

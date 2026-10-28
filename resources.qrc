@@ -3,5 +3,7 @@
     <file alias="active.png">resources/icons/active.png</file>
     <file alias="inactive.png">resources/icons/inactive.png</file>
     <file alias="app.ico">resources/icons/app.ico</file>
+    <file alias="chevron.png">resources/icons/chevron.png</file>
+    <file alias="chevron@2x.png">resources/icons/chevron@2x.png</file>
 </qresource>
 </RCC>

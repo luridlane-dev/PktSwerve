@@ -1,170 +1,239 @@
 #include "SettingsWindow.h"
+#include "app/Logger.h"
+#include "app/Theme.h"
+#include "app/ToggleSwitch.h"
 #include "core/BypassEngine.h"
 #include "core/DnsProbe.h"
-#include "app/Logger.h"
 
-#include <QTabWidget>
-#include <QCheckBox>
-#include <QSpinBox>
-#include <QLineEdit>
-#include <QTextEdit>
-#include <QLabel>
-#include <QPushButton>
 #include <QComboBox>
-
-#include <QApplication>
-#include <QHBoxLayout>
-#include <QVBoxLayout>
 #include <QFormLayout>
-#include <QGroupBox>
-#include <QLabel>
-#include <QMessageBox>
-#include <QScrollArea>
-#include <QtConcurrent/QtConcurrent>
 #include <QFuture>
-#include <QPointer>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMessageBox>
 #include <QProcess>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QShortcut>
+#include <QSpinBox>
+#include <QTabWidget>
+#include <QTextEdit>
+#include <QVBoxLayout>
+#include <QtConcurrent/QtConcurrent>
 
-static const char* NOTE_STYLE =
-    "color: #888; font-size: 11px; font-style: italic;";
+#include <cstdlib>
 
-static QLabel* makeNote(const QString& text)
+namespace {
+
+struct DnsPreset {
+    const char* name;
+    const char* ip;
+    int         port;
+};
+
+const DnsPreset kDnsPresets[] = {
+    {"Quad9 Unfiltered (Alt Port)",    "9.9.9.10",        9953},
+    {"Quad9 Secure (Alt Port 1)",      "9.9.9.9",         9953},
+    {"Quad9 Secure (Alt Port 2)",      "149.112.112.112", 9953},
+    {"OpenDNS Primary (Alt Port 1)",   "208.67.222.222",  5353},
+    {"OpenDNS Secondary (Alt Port 1)", "208.67.220.220",  5353},
+    {"OpenDNS Primary (Alt Port 2)",   "208.67.222.222",  443},
+    {"OpenDNS Secondary (Alt Port 2)", "208.67.220.220",  443},
+    {"AdGuard Default (Alt Port 1)",   "94.140.14.14",    5353},
+    {"AdGuard Default (Alt Port 2)",   "94.140.15.15",    5353},
+    {"AdGuard Family (Alt Port)",      "94.140.14.15",    5353},
+    {"Yandex Basic (Alt Port)",        "77.88.8.8",       1253},
+    {"Yandex Safe (Alt Port)",         "77.88.8.88",      1253},
+    {"CleanBrowsing Security (Alt)",   "185.228.168.9",   5353},
+    {"Cloudflare Primary",             "1.1.1.1",         53},
+    {"Cloudflare Secondary",           "1.0.0.1",         53},
+    {"Cloudflare Malware Block",       "1.1.1.2",         53},
+    {"Cloudflare Family Block",        "1.1.1.3",         53},
+    {"Google Primary",                 "8.8.8.8",         53},
+    {"Google Secondary",               "8.8.4.4",         53},
+    {"Quad9 Secure Primary",           "9.9.9.9",         53},
+    {"OpenDNS Primary",                "208.67.222.222",  53},
+    {"AdGuard Default",                "94.140.14.14",    53},
+    {"Yandex Basic",                   "77.88.8.8",       53},
+    {"ControlD Unfiltered",            "76.76.2.0",       53},
+};
+
+#ifdef PLATFORM_MACOS
+// The test runs as root, which the pf rules skip, so the engine can stay up.
+constexpr bool kProbeNeedsEngineOff = false;
+#else
+constexpr bool kProbeNeedsEngineOff = true;
+#endif
+
+QLabel* makeLabel(const QString& text, const char* name)
 {
-    QLabel* l = new QLabel(text);
-    l->setStyleSheet(NOTE_STYLE);
-    l->setWordWrap(true);
-    return l;
+    auto* label = new QLabel(text);
+    label->setObjectName(name);
+    label->setWordWrap(true);
+    return label;
+}
+
+QGroupBox* makeGroup(const QString& title)
+{
+    auto* group = new QGroupBox(title);
+    auto* lay = new QVBoxLayout(group);
+    lay->setSpacing(10);
+    return group;
+}
+
+void addForm(QGroupBox* group, QFormLayout* form)
+{
+    static_cast<QVBoxLayout*>(group->layout())->addLayout(form);
+}
+
+QCheckBox* addSwitch(QGroupBox* group, const QString& text, const QString& note = {})
+{
+    auto* box = new SwitchBox(text);
+    group->layout()->addWidget(box);
+    if (!note.isEmpty())
+        group->layout()->addWidget(makeLabel(note, "note"));
+    return box;
+}
+
+QSpinBox* makeSpin(int min, int max)
+{
+    auto* spin = new QSpinBox;
+    spin->setRange(min, max);
+    return spin;
+}
+
+QVBoxLayout* makePageLayout(QWidget* page, int margin = 4)
+{
+    auto* lay = new QVBoxLayout(page);
+    lay->setContentsMargins(margin, 8, margin, margin);
+    lay->setSpacing(16);
+    return lay;
+}
+
+QStringList splitLines(const QTextEdit* edit)
+{
+    QStringList result;
+    for (const QString& line : edit->toPlainText().split('\n')) {
+        const QString trimmed = line.trimmed().toLower();
+        if (!trimmed.isEmpty())
+            result << trimmed;
+    }
+    return result;
+}
+
+void flushDnsCache()
+{
+#ifdef PLATFORM_WINDOWS
+    LOG_INFO0("Flushing DNS cache (ipconfig /flushdns)");
+    system("ipconfig /flushdns >nul 2>&1");
+#elif defined(PLATFORM_MACOS)
+    LOG_INFO0("Flushing DNS cache (dscacheutil + mDNSResponder)");
+    QProcess::execute("/usr/bin/dscacheutil", {"-flushcache"});
+    QProcess::execute("/usr/bin/killall", {"-HUP", "mDNSResponder"});
+#endif
+}
+
+// Runs on a worker thread; returns the HTML shown in the test box.
+QString probeHtml(const QString& ip, int port)
+{
+    const QString good = Theme::green.name();
+    const QString warn = Theme::orange.name();
+    const QString bad  = Theme::red.name();
+    const QString dim  = Theme::subtext.name();
+
+    QHostAddress server;
+    if (!server.setAddress(ip))
+        return QString("<span style='color:%1;'><b>Invalid DNS server address.</b></span>").arg(bad);
+
+    const DnsProbeReport report = DnsProbe::probe(
+        server, static_cast<quint16>(port), DnsProbe::defaultTargets());
+
+    QString html = QString("<span style='font-size:14px; font-weight:600;'>Target Server: %1:%2</span><br>")
+                       .arg(ip).arg(port);
+    if (!report.serverError.isEmpty())
+        return html + QString("<span style='color:%1;'><b>Test error:</b> %2</span>")
+                          .arg(bad, report.serverError.toHtmlEscaped());
+
+    qint64 totalMs = 0;
+    int succeeded = 0;
+    QString rows;
+    for (const DnsProbeTargetResult& r : report.targets) {
+        const QString color = !r.succeeded ? bad : r.latencyMs > 250 ? bad : r.latencyMs > 80 ? warn : good;
+        const QString detail = r.succeeded ? QString("%1 ms").arg(r.latencyMs) : r.error.toHtmlEscaped();
+        rows += QString("<tr><td width='16'><span style='color:%1;'>&#9679;</span></td>"
+                        "<td width='105'>%2</td><td style='color:%3;'>%4</td></tr>")
+                    .arg(color, r.target.label.toHtmlEscaped(), dim, detail);
+        if (r.succeeded) {
+            totalMs += r.latencyMs;
+            ++succeeded;
+        }
+    }
+
+    const int failures = report.targets.size() - succeeded;
+    html += failures == 0
+        ? QString("<span style='color:%1;'><b>Status:</b> Resolver returned usable answers.</span><br>").arg(good)
+        : QString("<span style='color:%1;'><b>Resolver warning:</b> %2 domain(s) had no usable answer.</span><br>")
+              .arg(warn).arg(failures);
+    if (succeeded > 0)
+        html += QString("<span style='color:%1;'>Average latency:</span> %2 ms<br>").arg(dim).arg(totalMs / succeeded);
+
+    return html + "<table width='100%' cellspacing='0' cellpadding='2'>" + rows + "</table>";
+}
+
 }
 
 
 SettingsWindow::SettingsWindow(BypassEngine* engine, QWidget* parent)
     : QMainWindow(parent), m_engine(engine)
 {
-    setWindowTitle("PktSwerve | Settings");
-    setMinimumSize(920, 860);
+    setWindowTitle("PktSwerve Settings");
+    setMinimumSize(680, 720);
     buildUi();
     loadToUi(m_engine->config());
 
-    connect(m_engine, &BypassEngine::configChanged, this, [this]() {
-        LOG_DEBUG0("SettingsWindow: config changed externally - reloading UI");
-        loadToUi(m_engine->config());
-    });
-
-    LOG_INFO0("SettingsWindow created");
+    new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_W), this, this, &QWidget::close);
+    connect(m_engine, &BypassEngine::configChanged, this, [this] { loadToUi(m_engine->config()); });
 }
 
 void SettingsWindow::buildUi()
 {
-    setStyleSheet(R"(
-        QMainWindow, QWidget {
-            background: #0d0d0d;
-            color: #e0e0e0;
-            font-family: 'Segoe UI', sans-serif;
-            font-size: 13px;
-        }
-        QTabWidget::pane   { border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; background: #0a0a0a; }
-        QTabBar::tab       { padding: 10px 20px; background: transparent; color: #666; border-bottom: 2px solid transparent; }
-        QTabBar::tab:selected { color: #ffffff; border-bottom: 2px solid #ffffff; }
-        QTabBar::tab:hover { color: #aaa; }
-
-        QGroupBox {
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 6px;
-            margin-top: 18px;
-            padding-top: 16px;
-            color: #777;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.8px;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            subcontrol-position: top left;
-            left: 12px;
-            top: 0px;
-            padding: 0 6px;
-            background: #0a0a0a;
-        }
-
-        QCheckBox { spacing: 8px; }
-        QCheckBox::indicator {
-            width: 34px; height: 18px;
-            border-radius: 9px;
-            border: none;
-            background: #2a2a2a;
-        }
-        QCheckBox::indicator:checked { background: #ffffff; }
-
-        QLineEdit, QSpinBox, QTextEdit, QComboBox {
-            background: #141414;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 6px;
-            padding: 8px 10px;
-            color: #e0e0e0;
-        }
-        QLineEdit:focus, QSpinBox:focus, QTextEdit:focus, QComboBox:focus { border-color: #555; }
-
-        QPushButton {
-            background: #141414;
-            border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 6px;
-            padding: 8px 18px;
-            color: #aaa;
-        }
-        QPushButton:hover { background: #222; color: #ffffff; }
-
-        QPushButton#applyBtn { background: #ffffff; color: #000000; border: none; font-weight: 600; }
-        QPushButton#applyBtn:hover { background: #d0d0d0; }
-
-        QPushButton#cancelBtn { background: transparent; color: #777; border: 1px solid rgba(255,255,255,0.1); }
-        QPushButton#cancelBtn:hover { color: #fff; }
-
-        QPushButton#resetBtn { background: transparent; color: #ff4d4d; border: 1px solid rgba(255,77,77,0.3); }
-        QPushButton#resetBtn:hover { background: rgba(255,77,77,0.1); border-color: rgba(255,77,77,0.6); }
-
-        QScrollArea { border: none; }
-    )");
-
-    QWidget* central = new QWidget(this);
+    auto* central = new QWidget;
     setCentralWidget(central);
 
-    setWindowFlags(windowFlags() | Qt::Window);
-    setAttribute(Qt::WA_ShowWithoutActivating, false);
-
-    QVBoxLayout* mainLay = new QVBoxLayout(central);
-    mainLay->setContentsMargins(20, 20, 20, 16);
+    auto* mainLay = new QVBoxLayout(central);
+    mainLay->setContentsMargins(20, 16, 20, 18);
     mainLay->setSpacing(12);
 
-    m_tabs = new QTabWidget();
-    auto* genTab  = new QWidget(); buildGeneralTab(genTab);
-    auto* methTab = new QWidget(); buildMethodsTab(methTab);
-    auto* dnsTab  = new QWidget(); buildDnsTab(dnsTab);
-    auto* hostTab = new QWidget(); buildHostlistTab(hostTab);
-    auto* aboutTab= new QWidget(); buildAboutTab(aboutTab);
-
-    m_tabs->addTab(genTab,  "General");
-    m_tabs->addTab(methTab, "Methods");
-    m_tabs->addTab(dnsTab,  "DNS");
-    m_tabs->addTab(hostTab, "Domain List");
-    m_tabs->addTab(aboutTab,"About");
-
+    using Builder = void (SettingsWindow::*)(QWidget*);
+    const std::pair<const char*, Builder> tabs[] = {
+        {"General",     &SettingsWindow::buildGeneralTab},
+        {"Methods",     &SettingsWindow::buildMethodsTab},
+        {"DNS",         &SettingsWindow::buildDnsTab},
+        {"Domain List", &SettingsWindow::buildHostlistTab},
+        {"About",       &SettingsWindow::buildAboutTab},
+    };
+    m_tabs = new QTabWidget;
+    for (const auto& [title, build] : tabs) {
+        auto* page = new QWidget;
+        (this->*build)(page);
+        m_tabs->addTab(page, title);
+    }
     mainLay->addWidget(m_tabs, 1);
 
-    QHBoxLayout* botRow = new QHBoxLayout();
+    auto* resetBtn  = new QPushButton("Reset to Defaults");
+    auto* cancelBtn = new QPushButton("Cancel");
+    auto* applyBtn  = new QPushButton("Apply");
+    resetBtn->setObjectName("destructiveBtn");
+    applyBtn->setObjectName("primaryBtn");
 
-    QPushButton* resetBtn = new QPushButton("Reset to Defaults");
-    resetBtn->setObjectName("resetBtn");
-    botRow->addWidget(resetBtn);
-
-    botRow->addStretch();
-
-    QPushButton* cancelBtn = new QPushButton("Cancel");
-    cancelBtn->setObjectName("cancelBtn");
-    QPushButton* applyBtn  = new QPushButton("Apply");
-    applyBtn->setObjectName("applyBtn");
-    botRow->addWidget(cancelBtn);
-    botRow->addWidget(applyBtn);
-    mainLay->addLayout(botRow);
+    auto* buttons = new QHBoxLayout;
+    buttons->addWidget(resetBtn);
+    buttons->addStretch();
+    buttons->addWidget(cancelBtn);
+    buttons->addWidget(applyBtn);
+    mainLay->addLayout(buttons);
 
     connect(resetBtn,  &QPushButton::clicked, this, &SettingsWindow::onResetDefaults);
     connect(cancelBtn, &QPushButton::clicked, this, &QWidget::close);
@@ -174,323 +243,197 @@ void SettingsWindow::buildUi()
 
 void SettingsWindow::buildGeneralTab(QWidget* tab)
 {
-    QVBoxLayout* lay = new QVBoxLayout(tab);
-    lay->setContentsMargins(20, 20, 20, 0);
-    lay->setSpacing(16);
+    QVBoxLayout* lay = makePageLayout(tab);
 
-    QGroupBox* modeGroup = new QGroupBox("OPERATING MODE");
-    QVBoxLayout* mg = new QVBoxLayout(modeGroup);
-    mg->setSpacing(8);
-
-    m_modeCombo = new QComboBox();
-    m_modeCombo->addItem("Disabled",           static_cast<int>(BypassMode::Disabled));
+    QGroupBox* modeGroup = makeGroup("OPERATING MODE");
+    m_modeCombo = new QComboBox;
+    m_modeCombo->addItem("Disabled",            static_cast<int>(BypassMode::Disabled));
     m_modeCombo->addItem("Selected Sites Only", static_cast<int>(BypassMode::BlacklistMode));
-    m_modeCombo->addItem("Global",             static_cast<int>(BypassMode::GlobalMode));
-    mg->addWidget(m_modeCombo);
-    mg->addWidget(makeNote(
-        "Selected Sites Only: bypass only the sites you add to the Site List tab.\n"
-        "Global: affects all HTTP/HTTPS traffic."));
-
+    m_modeCombo->addItem("Global",              static_cast<int>(BypassMode::GlobalMode));
+    modeGroup->layout()->addWidget(m_modeCombo);
+    modeGroup->layout()->addWidget(makeLabel(
+        "Selected Sites Only bypasses just the domains in the Domain List tab.\n"
+        "Global affects all HTTP/HTTPS traffic.", "note"));
     lay->addWidget(modeGroup);
 
-    QGroupBox* sysGroup = new QGroupBox("SYSTEM");
-    QVBoxLayout* sg = new QVBoxLayout(sysGroup);
+    QGroupBox* sysGroup = makeGroup("SYSTEM");
 #ifdef PLATFORM_MACOS
-    m_autoStartCheck = new QCheckBox("Launch at login");
+    m_autoStartCheck = addSwitch(sysGroup, "Launch at login");
 #else
-    m_autoStartCheck = new QCheckBox("Launch at Windows startup");
+    m_autoStartCheck = addSwitch(sysGroup, "Launch at Windows startup");
 #endif
-    sg->addWidget(m_autoStartCheck);
     lay->addWidget(sysGroup);
-
-    connect(m_modeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &SettingsWindow::onModeChanged);
-
     lay->addStretch();
+
+    connect(m_modeCombo, &QComboBox::currentIndexChanged, this, &SettingsWindow::onModeChanged);
 }
 
 
 void SettingsWindow::buildMethodsTab(QWidget* tab)
 {
-    QScrollArea* scroll = new QScrollArea(tab);
+    auto* scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
-    QWidget* content = new QWidget();
+    auto* content = new QWidget;
     scroll->setWidget(content);
-    QVBoxLayout* outer = new QVBoxLayout(tab);
-    outer->setContentsMargins(0,0,0,0);
-    outer->addWidget(scroll);
+    makePageLayout(tab, 0)->addWidget(scroll);
 
-    QVBoxLayout* lay = new QVBoxLayout(content);
-    lay->setContentsMargins(20, 20, 20, 20);
-    lay->setSpacing(16);
+    QVBoxLayout* lay = makePageLayout(content);
 
-    QGroupBox* fragGroup = new QGroupBox("FRAGMENTATION");
-    QVBoxLayout* fg = new QVBoxLayout(fragGroup);
-    fg->setSpacing(10);
-
-    m_fragHttps = new QCheckBox("HTTPS / TLS ClientHello fragmentation");
-    fg->addWidget(m_fragHttps);
-    fg->addWidget(makeNote(
-        "Splits the TLS handshake packet so the SNI (target domain) "
-        "doesn't appear in a single packet. Primary bypass method."));
-
-    m_fragHttp = new QCheckBox("HTTP fragmentation");
-    fg->addWidget(m_fragHttp);
-    fg->addWidget(makeNote(
-        "Fragments plaintext HTTP on port 80. "
-        "Rarely needed since most sites use HTTPS."));
-
-    m_reverseFrag = new QCheckBox("Send fragments in reverse order");
-    fg->addWidget(m_reverseFrag);
-    fg->addWidget(makeNote(
-        "Sends fragment 2 before fragment 1. "
-        "May confuse additional DPI systems; disable if connections break."));
-
+    QGroupBox* fragGroup = makeGroup("FRAGMENTATION");
+    m_fragHttps = addSwitch(fragGroup, "HTTPS / TLS ClientHello fragmentation",
+        "Splits the TLS handshake packet so the SNI (target domain) doesn't appear "
+        "in a single packet. Primary bypass method.");
+    m_fragHttp = addSwitch(fragGroup, "HTTP fragmentation",
+        "Fragments plaintext HTTP on port 80. Rarely needed since most sites use HTTPS.");
+    m_reverseFrag = addSwitch(fragGroup, "Send fragments in reverse order",
+        "Sends fragment 2 before fragment 1. May confuse additional DPI systems; "
+        "disable if connections break.");
 #ifdef PLATFORM_MACOS
-    m_tlsRecSplit = new QCheckBox("Split TLS record at the SNI");
-    fg->addWidget(m_tlsRecSplit);
-    fg->addWidget(makeNote(
-        "Re-frames the ClientHello as two TLS records cut in the middle of the "
-        "domain name, so DPI that reassembles TCP segments still can't read it. "
-        "Disable if some sites stop loading."));
+    m_tlsRecSplit = addSwitch(fragGroup, "Split TLS record at the SNI",
+        "Re-frames the ClientHello as two TLS records cut in the middle of the domain name, "
+        "so DPI that reassembles TCP segments still can't read it. "
+        "Disable if some sites stop loading.");
 #endif
 
-    QFormLayout* fragParams = new QFormLayout();
-    m_httpFragSize  = new QSpinBox(); m_httpFragSize->setRange(1, 512);
-    m_httpsFragSize = new QSpinBox(); m_httpsFragSize->setRange(1, 512);
-    fragParams->addRow("HTTP fragment size (bytes):",  m_httpFragSize);
-    fragParams->addRow("HTTPS fragment size (bytes):", m_httpsFragSize);
-    fg->addLayout(fragParams);
-    fg->addWidget(makeNote("Default of 2 bytes is optimal. Larger values may bypass certain DPI types."));
-
+    m_httpFragSize  = makeSpin(1, 512);
+    m_httpsFragSize = makeSpin(1, 512);
+    auto* sizes = new QFormLayout;
+    sizes->addRow("HTTP fragment size (bytes):",  m_httpFragSize);
+    sizes->addRow("HTTPS fragment size (bytes):", m_httpsFragSize);
+    addForm(fragGroup, sizes);
+    fragGroup->layout()->addWidget(makeLabel(
+        "Default of 2 bytes is optimal. Larger values may bypass certain DPI types.", "note"));
     lay->addWidget(fragGroup);
 
-    // --- Deception packets ---
-    QGroupBox* fakeGroup = new QGroupBox("DECEPTION PACKET TECHNIQUES");
-    QVBoxLayout* fkl = new QVBoxLayout(fakeGroup);
-    fkl->setSpacing(10);
-
-    m_fakePackets = new QCheckBox("Low-TTL fake packet");
-    fkl->addWidget(m_fakePackets);
-    fkl->addWidget(makeNote(
+    QGroupBox* fakeGroup = makeGroup("DECEPTION PACKET TECHNIQUES");
+    m_fakePackets = addSwitch(fakeGroup, "Low-TTL fake packet",
         "Sends a decoy packet the DPI sees but drops before reaching the real server "
-        "due to low TTL. Works best combined with fragmentation."));
+        "due to low TTL. Works best combined with fragmentation.");
+    m_wrongChecksum = addSwitch(fakeGroup, "Wrong TCP checksum fake packet",
+        "Confuses DPI systems that skip checksum validation. The real server rejects "
+        "the packet, but the DPI context table is corrupted.");
+    m_wrongSeq = addSwitch(fakeGroup, "Wrong sequence number fake packet",
+        "Disrupts DPI TCP stream reassembly. Aggressive; try disabling if other methods "
+        "cause issues.");
 
-    m_wrongChecksum = new QCheckBox("Wrong TCP checksum fake packet");
-    fkl->addWidget(m_wrongChecksum);
-    fkl->addWidget(makeNote(
-        "Confuses DPI systems that skip checksum validation. "
-        "Real server rejects the packet, but the DPI context table is corrupted."));
-
-    m_wrongSeq = new QCheckBox("Wrong sequence number fake packet");
-    fkl->addWidget(m_wrongSeq);
-    fkl->addWidget(makeNote(
-        "Disrupts DPI TCP stream reassembly. "
-        "Aggressive technique; try disabling if other methods cause issues."));
-
-    QFormLayout* ttlForm = new QFormLayout();
-    m_fakeTTL = new QSpinBox();
-    m_fakeTTL->setRange(1, 128);
+    m_fakeTTL = makeSpin(1, 128);
     m_fakeTTL->setValue(8);
-    ttlForm->addRow("Fake packet TTL:", m_fakeTTL);
-    fkl->addLayout(ttlForm);
-    fkl->addWidget(makeNote(
-        "Fake packet lifetime in hops. Too high and the packet may reach the destination."));
-
+    auto* ttl = new QFormLayout;
+    ttl->addRow("Fake packet TTL:", m_fakeTTL);
+    addForm(fakeGroup, ttl);
+    fakeGroup->layout()->addWidget(makeLabel(
+        "Fake packet lifetime in hops. Too high and the packet may reach the destination.", "note"));
     lay->addWidget(fakeGroup);
+    lay->addStretch();
 
 #ifdef PLATFORM_MACOS
-    // The macOS backend is a local TCP proxy: the kernel builds the segments,
-    // so packet-level tricks (reordering, fake/invalid packets) are not possible.
+    // The proxy backend cannot reorder segments or craft invalid packets.
     const QString unsupported = "Not available on macOS (proxy-based backend).";
-    for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum,
-                                      m_wrongSeq, m_fakeTTL}) {
+    for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum, m_wrongSeq, m_fakeTTL}) {
         w->setEnabled(false);
         w->setToolTip(unsupported);
     }
     fakeGroup->setToolTip(unsupported);
 #endif
-
-    lay->addStretch();
 }
 
 
 void SettingsWindow::buildDnsTab(QWidget* tab)
 {
-    QVBoxLayout* lay = new QVBoxLayout(tab);
-    lay->setContentsMargins(20, 20, 20, 20);
-    lay->setSpacing(16);
+    QVBoxLayout* lay = makePageLayout(tab);
 
-    QGroupBox* enableGroup = new QGroupBox("DNS REDIRECT");
-    QVBoxLayout* eg = new QVBoxLayout(enableGroup);
-    m_dnsRedirect = new QCheckBox("Enable DNS redirect");
-    eg->addWidget(m_dnsRedirect);
-    eg->addWidget(makeNote("Routes DNS queries to the server below instead of your ISP's DNS."));
+    QGroupBox* enableGroup = makeGroup("DNS REDIRECT");
+    m_dnsRedirect = addSwitch(enableGroup, "Enable DNS redirect",
+        "Routes DNS queries to the server below instead of your ISP's DNS.");
     lay->addWidget(enableGroup);
 
-    QHBoxLayout* splitLay = new QHBoxLayout();
-    splitLay->setSpacing(16);
+    QGroupBox* presetGroup = makeGroup("PRESET SERVERS");
+    m_dnsPresetCombo = new QComboBox;
+    m_dnsPresetCombo->addItem("Manual entry");
+    for (const DnsPreset& p : kDnsPresets)
+        m_dnsPresetCombo->addItem(QString("%1 — %2:%3").arg(p.name, p.ip).arg(p.port));
+    presetGroup->layout()->addWidget(m_dnsPresetCombo);
+    connect(m_dnsPresetCombo, &QComboBox::currentIndexChanged, this, &SettingsWindow::onDnsPresetSelected);
 
-    QVBoxLayout* leftCol = new QVBoxLayout();
-
-    QGroupBox* presetGroup = new QGroupBox("PRESET SERVERS");
-    QVBoxLayout* pg = new QVBoxLayout(presetGroup);
-
-    m_dnsPresetCombo = new QComboBox();
-    m_dnsPresetCombo->addItem("— Manual entry —", "||");
-
-    m_dnsPresetCombo->addItem("Quad9 Unfiltered (Alt Port)     9.9.9.10 : 9953",        "9.9.9.10|9953");
-    m_dnsPresetCombo->addItem("Quad9 Secure (Alt Port 1)       9.9.9.9 : 9953",         "9.9.9.9|9953");
-    m_dnsPresetCombo->addItem("Quad9 Secure (Alt Port 2)       149.112.112.112 : 9953", "149.112.112.112|9953");
-    m_dnsPresetCombo->addItem("OpenDNS Primary (Alt Port 1)    208.67.222.222 : 5353",  "208.67.222.222|5353");
-    m_dnsPresetCombo->addItem("OpenDNS Secondary (Alt Port 1)  208.67.220.220 : 5353",  "208.67.220.220|5353");
-    m_dnsPresetCombo->addItem("OpenDNS Primary (Alt Port 2)    208.67.222.222 : 443",   "208.67.222.222|443");
-    m_dnsPresetCombo->addItem("OpenDNS Secondary (Alt Port 2)  208.67.220.220 : 443",   "208.67.220.220|443");
-    m_dnsPresetCombo->addItem("AdGuard Default (Alt Port 1)    94.140.14.14 : 5353",    "94.140.14.14|5353");
-    m_dnsPresetCombo->addItem("AdGuard Default (Alt Port 2)    94.140.15.15 : 5353",    "94.140.15.15|5353");
-    m_dnsPresetCombo->addItem("AdGuard Family (Alt Port)       94.140.14.15 : 5353",    "94.140.14.15|5353");
-    m_dnsPresetCombo->addItem("Yandex Basic (Alt Port)         77.88.8.8 : 1253",       "77.88.8.8|1253");
-    m_dnsPresetCombo->addItem("Yandex Safe (Alt Port)          77.88.8.88 : 1253",      "77.88.8.88|1253");
-    m_dnsPresetCombo->addItem("CleanBrowsing Security (Alt)    185.228.168.9 : 5353",   "185.228.168.9|5353");
-
-    m_dnsPresetCombo->addItem("Cloudflare Primary              1.1.1.1 : 53",           "1.1.1.1|53");
-    m_dnsPresetCombo->addItem("Cloudflare Secondary            1.0.0.1 : 53",           "1.0.0.1|53");
-    m_dnsPresetCombo->addItem("Cloudflare Malware Block        1.1.1.2 : 53",           "1.1.1.2|53");
-    m_dnsPresetCombo->addItem("Cloudflare Family Block         1.1.1.3 : 53",           "1.1.1.3|53");
-    m_dnsPresetCombo->addItem("Google Primary                  8.8.8.8 : 53",           "8.8.8.8|53");
-    m_dnsPresetCombo->addItem("Google Secondary                8.8.4.4 : 53",           "8.8.4.4|53");
-    m_dnsPresetCombo->addItem("Quad9 Secure Primary            9.9.9.9 : 53",           "9.9.9.9|53");
-    m_dnsPresetCombo->addItem("OpenDNS Primary                 208.67.222.222 : 53",    "208.67.222.222|53");
-    m_dnsPresetCombo->addItem("AdGuard Default                 94.140.14.14 : 53",      "94.140.14.14|53");
-    m_dnsPresetCombo->addItem("Yandex Basic                    77.88.8.8 : 53",         "77.88.8.8|53");
-    m_dnsPresetCombo->addItem("ControlD Unfiltered             76.76.2.0 : 53",         "76.76.2.0|53");
-
-    pg->addWidget(m_dnsPresetCombo);
-    leftCol->addWidget(presetGroup);
-
-    connect(m_dnsPresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &SettingsWindow::onDnsPresetSelected);
-
-    QGroupBox* manualGroup = new QGroupBox("SERVER ADDRESS");
-    QFormLayout* form = new QFormLayout(manualGroup);
-    m_dnsServer = new QLineEdit();
+    QGroupBox* addressGroup = new QGroupBox("SERVER ADDRESS");
+    auto* form = new QFormLayout(addressGroup);
+    m_dnsServer = new QLineEdit;
     m_dnsServer->setPlaceholderText("e.g. 9.9.9.10");
-    m_dnsPort = new QSpinBox();
-    m_dnsPort->setRange(1, 65535);
+    m_dnsPort = makeSpin(1, 65535);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     form->addRow("IP Address:", m_dnsServer);
     form->addRow("Port:",       m_dnsPort);
-    leftCol->addWidget(manualGroup);
 
-    leftCol->addStretch();
-
-    QGroupBox* checkGroup = new QGroupBox("CONNECTIVITY TEST");
-    QVBoxLayout* cl = new QVBoxLayout(checkGroup);
-
+    QGroupBox* testGroup = makeGroup("CONNECTIVITY TEST");
     m_checkBtn = new QPushButton("Test Connection");
-    m_checkBtn->setObjectName("applyBtn");
-    cl->addWidget(m_checkBtn);
-
+    m_checkBtn->setObjectName("primaryBtn");
     connect(m_checkBtn, &QPushButton::clicked, this, &SettingsWindow::onCheckConnectivity);
-
-    m_dnsStatusLabel = new QTextEdit();
+    m_dnsStatusLabel = new QTextEdit;
     m_dnsStatusLabel->setReadOnly(true);
-    m_dnsStatusLabel->setStyleSheet(
-        "background: transparent; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;"
-        " color: #d0d0d0; font-size: 13px; font-family: 'Segoe UI', sans-serif; padding: 12px; line-height: 1.5;");
-    cl->addWidget(m_dnsStatusLabel);
+    testGroup->layout()->addWidget(m_checkBtn);
+    testGroup->layout()->addWidget(m_dnsStatusLabel);
 
-    splitLay->addLayout(leftCol, 1);
-    splitLay->addWidget(checkGroup, 1);
+    auto* left = new QVBoxLayout;
+    left->addWidget(presetGroup);
+    left->addWidget(addressGroup);
+    left->addStretch();
 
-    lay->addLayout(splitLay, 1);
+    auto* columns = new QHBoxLayout;
+    columns->setSpacing(16);
+    columns->addLayout(left, 1);
+    columns->addWidget(testGroup, 1);
+    lay->addLayout(columns, 1);
 }
 
 
 void SettingsWindow::buildHostlistTab(QWidget* tab)
 {
-    QVBoxLayout* outer = new QVBoxLayout(tab);
-    outer->setContentsMargins(0, 0, 0, 0);
+    m_hostListWidget = tab;
+    QVBoxLayout* lay = makePageLayout(tab);
 
-    m_hostListWidget = new QWidget();
-    QVBoxLayout* lay = new QVBoxLayout(m_hostListWidget);
-    lay->setContentsMargins(20, 20, 20, 20);
-    lay->setSpacing(12);
-
-    lay->addWidget(makeNote(
+    lay->addWidget(makeLabel(
         "One domain per line. Subdomains match automatically "
-        "(e.g. 'example.com' also covers 'api.example.com')."));
+        "(e.g. 'example.com' also covers 'api.example.com').", "note"));
+    lay->addWidget(makeLabel("Bypass List", "heading"));
 
-    QLabel* listTitle = new QLabel("Bypass List");
-    listTitle->setStyleSheet("font-weight: 600; font-size: 13px; color: #e0e0e0;");
-    lay->addWidget(listTitle);
-    lay->addWidget(makeNote("Traffic to these domains will be bypassed."));
-
-    m_blacklistEdit = new QTextEdit();
+    m_blacklistEdit = new QTextEdit;
     m_blacklistEdit->setPlaceholderText("discord.com\ntwitter.com\nreddit.com");
     lay->addWidget(m_blacklistEdit);
-
-    outer->addWidget(m_hostListWidget);
 }
 
 
 void SettingsWindow::buildAboutTab(QWidget* tab)
 {
-    QVBoxLayout* mainLay = new QVBoxLayout(tab);
-    mainLay->setContentsMargins(32, 32, 32, 32);
-    mainLay->setSpacing(0);
+    QVBoxLayout* lay = makePageLayout(tab, 20);
+    lay->setSpacing(6);
 
-    QLabel* titleLabel = new QLabel("PktSwerve");
-    titleLabel->setStyleSheet("font-size: 24px; font-weight: 700; color: #ffffff; letter-spacing: 0.5px;");
-    mainLay->addWidget(titleLabel);
-
-    QLabel* versionLabel = new QLabel(
-        "Version " + QCoreApplication::applicationVersion()
-        );
-    versionLabel->setStyleSheet("font-size: 12px; color: #555; margin-top: 2px; margin-bottom: 24px;");
-    mainLay->addWidget(versionLabel);
-
-    QLabel* developerLabel = new QLabel("Developed by Lurid Lane · Jadis0x");
-    developerLabel->setStyleSheet("font-size: 11px; color: #777; margin-bottom: 18px;");
-    mainLay->addWidget(developerLabel);
-
-    QLabel* descLabel = new QLabel(
+    lay->addWidget(makeLabel("PktSwerve", "title"));
+    lay->addWidget(makeLabel("Version " + QCoreApplication::applicationVersion(), "note"));
+    lay->addSpacing(14);
+    lay->addWidget(makeLabel("Developed by Lurid Lane · Jadis0x", "note"));
+    lay->addSpacing(14);
+    lay->addWidget(makeLabel(
         "PktSwerve is a custom packet manipulation tool designed to bypass network "
-        "restrictions and secure personal traffic. "
-        );
-    descLabel->setWordWrap(true);
-    descLabel->setMaximumWidth(520);
-    descLabel->setStyleSheet("font-size: 13px; color: #b0b0b0; line-height: 1.6; margin-bottom: 20px;");
-    mainLay->addWidget(descLabel);
-
-    QLabel* noteLabel = new QLabel(
-        "This is a private utility. The developer assumes no responsibility "
-        "for network issues, connection drops, or any misuse of this software."
-        );
-    noteLabel->setWordWrap(true);
-    noteLabel->setMaximumWidth(520);
-    noteLabel->setStyleSheet("font-size: 11px; color: #666; font-style: italic; line-height: 1.4; margin-bottom: 28px;");
-    mainLay->addWidget(noteLabel);
-
-    mainLay->addStretch();
+        "restrictions and secure personal traffic.", "body"));
+    lay->addSpacing(14);
+    lay->addWidget(makeLabel(
+        "This is a private utility. The developer assumes no responsibility for network "
+        "issues, connection drops, or any misuse of this software.", "meta"));
+    lay->addStretch();
 }
 
-void SettingsWindow::onModeChanged(int /*index*/)
+
+void SettingsWindow::onModeChanged(int)
 {
-    BypassMode mode = static_cast<BypassMode>(m_modeCombo->currentData().toInt());
-    bool hostListNeeded = (mode == BypassMode::BlacklistMode);
-    if (m_hostListWidget)
-        m_hostListWidget->setEnabled(hostListNeeded);
-    LOG_DEBUG("SettingsWindow: mode changed to %1", static_cast<int>(mode));
+    const auto mode = static_cast<BypassMode>(m_modeCombo->currentData().toInt());
+    m_hostListWidget->setEnabled(mode == BypassMode::BlacklistMode);
 }
 
 void SettingsWindow::loadToUi(const BypassConfig& cfg)
 {
-    for (int i = 0; i < m_modeCombo->count(); ++i) {
-        if (m_modeCombo->itemData(i).toInt() == static_cast<int>(cfg.mode)) {
-            m_modeCombo->setCurrentIndex(i);
-            break;
-        }
-    }
+    const int modeIndex = m_modeCombo->findData(static_cast<int>(cfg.mode));
+    if (modeIndex >= 0)
+        m_modeCombo->setCurrentIndex(modeIndex);
     onModeChanged(0);
 
     m_autoStartCheck->setChecked(m_engine->autoStart());
@@ -498,7 +441,8 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_fragHttps->setChecked(cfg.fragmentHttpsPersist);
     m_fragHttp->setChecked(cfg.fragmentHttpRequests);
     m_reverseFrag->setChecked(cfg.reverseFrag);
-    if (m_tlsRecSplit) m_tlsRecSplit->setChecked(cfg.tlsRecordSplit);
+    if (m_tlsRecSplit)
+        m_tlsRecSplit->setChecked(cfg.tlsRecordSplit);
     m_httpFragSize->setValue(cfg.httpFragmentSize);
     m_httpsFragSize->setValue(cfg.httpsFragmentSize);
     m_fakePackets->setChecked(cfg.fakePackets);
@@ -512,8 +456,6 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_dnsPresetCombo->setCurrentIndex(0);
 
     m_blacklistEdit->setPlainText(cfg.blacklist.join("\n"));
-
-    LOG_DEBUG("SettingsWindow: UI loaded from config");
 }
 
 BypassConfig SettingsWindow::uiToConfig()
@@ -525,7 +467,7 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.fragmentHttpRequests = m_fragHttp->isChecked();
     cfg.reverseFrag          = m_reverseFrag->isChecked();
     cfg.tlsRecordSplit       = m_tlsRecSplit && m_tlsRecSplit->isChecked();
-    cfg.httpFragmentSize    = m_httpFragSize->value();
+    cfg.httpFragmentSize     = m_httpFragSize->value();
     cfg.httpsFragmentSize    = m_httpsFragSize->value();
     cfg.fakePackets          = m_fakePackets->isChecked();
     cfg.wrongChecksum        = m_wrongChecksum->isChecked();
@@ -536,20 +478,13 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.dnsServer   = m_dnsServer->text().trimmed();
     cfg.dnsPort     = m_dnsPort->value();
 
-    auto splitLines = [](QTextEdit* t) {
-        QStringList result;
-        for (const auto& line : t->toPlainText().split('\n'))
-            if (!line.trimmed().isEmpty()) result << line.trimmed().toLower();
-        return result;
-    };
     cfg.blacklist = splitLines(m_blacklistEdit);
     return cfg;
 }
 
 void SettingsWindow::onApply()
 {
-    LOG_INFO0("SettingsWindow::onApply called");
-    BypassConfig cfg = uiToConfig();
+    const BypassConfig cfg = uiToConfig();
 
     if (cfg.dnsServer.isEmpty()) {
         LOG_WARN0("Apply rejected: DNS server address is empty");
@@ -560,18 +495,10 @@ void SettingsWindow::onApply()
 
     m_engine->setAutoStart(m_autoStartCheck->isChecked());
     m_engine->setConfig(cfg);
-
-#ifdef PLATFORM_WINDOWS
-    LOG_INFO0("Flushing DNS cache (ipconfig /flushdns)");
-    system("ipconfig /flushdns >nul 2>&1");
-#elif defined(PLATFORM_MACOS)
-    LOG_INFO0("Flushing DNS cache (dscacheutil + mDNSResponder)");
-    QProcess::execute("/usr/bin/dscacheutil", {"-flushcache"});
-    QProcess::execute("/usr/bin/killall", {"-HUP", "mDNSResponder"});
-#endif
+    flushDnsCache();
 
     if (m_engine->isRunning()) {
-        LOG_INFO0("Engine was running - restarting to apply new config");
+        LOG_INFO0("Restarting engine to apply new config");
         m_engine->stop();
         m_engine->start();
     }
@@ -580,276 +507,52 @@ void SettingsWindow::onApply()
 
 void SettingsWindow::onDnsPresetSelected(int index)
 {
-    QString data = m_dnsPresetCombo->itemData(index).toString();
-    if (data.isEmpty() || data == "||") return;
-
-    QStringList parts = data.split('|');
-    if (parts.size() < 2) return;
-    m_dnsServer->setText(parts[0]);
-    m_dnsPort->setValue(parts[1].toInt());
-    LOG_INFO("DNS preset selected: %1:%2", parts[0], parts[1]);
+    if (index <= 0)
+        return;
+    const DnsPreset& preset = kDnsPresets[index - 1];
+    m_dnsServer->setText(preset.ip);
+    m_dnsPort->setValue(preset.port);
+    LOG_INFO("DNS preset selected: %1:%2", preset.ip, preset.port);
 }
-
 
 void SettingsWindow::onCheckConnectivity()
 {
-    LOG_INFO0("DNS connectivity test started");
     m_checkBtn->setEnabled(false);
     m_dnsStatusLabel->setPlainText("Testing...");
 
-    QString ip   = m_dnsServer->text().trimmed();
-    int     port = m_dnsPort->value();
-    bool wasRunning = m_engine->isRunning();
-
-    LOG_INFO("Test target: %1:%2 | engineWasRunning=%3", ip, port, wasRunning ? "yes" : "no");
-
-    QPointer<SettingsWindow> safeThis(this);
-
-    auto startTest = [safeThis, ip, port, wasRunning]() {
-        if (!safeThis) return;
-
-        LOG_INFO0("DNS test: launching async worker");
-        auto* watcher = new QFutureWatcher<QString>(safeThis.data());
-
-        connect(watcher, &QFutureWatcher<QString>::finished,
-                safeThis.data(), [safeThis, watcher, wasRunning]()
-                {
-                    if (!safeThis) { watcher->deleteLater(); return; }
-
-                    QString result = watcher->result();
-
-                    QString logText = result;
-                    logText.replace(QRegularExpression("<[^>]*>"), "");
-                    LOG_INFO("DNS test completed:\n%1", logText);
-
-
-                    safeThis->m_dnsStatusLabel->setHtml(result);
-                    safeThis->m_checkBtn->setEnabled(true);
-                    watcher->deleteLater();
-
-                    if (wasRunning && safeThis->m_engine) {
-                        LOG_INFO0("DNS test done - restarting engine");
-                        safeThis->m_engine->start();
-                    }
-                });
-
-        watcher->setFuture(QtConcurrent::run([ip, port]() -> QString {
-            QHostAddress server;
-            if (!server.setAddress(ip)) {
-                return "<span style='color:#ff4d4d;'><b>Invalid DNS server address.</b></span>";
-            }
-
-            const DnsProbeReport report = DnsProbe::probe(
-                server, static_cast<quint16>(port), DnsProbe::defaultTargets());
-            QString result = QString("<div style='line-height: 1.2;'>"
-                                     "<span style='font-size:14px; font-weight:600; color:#ffffff;'>"
-                                     "Target Server: %1:%2</span><br>")
-                                 .arg(ip, QString::number(port));
-            if (!report.serverError.isEmpty()) {
-                return result + QString("<span style='color:#ff4d4d;'><b>Test error:</b> %1</span></div>")
-                                    .arg(report.serverError.toHtmlEscaped());
-            }
-
-            qint64 totalLatency = 0;
-            int successCount = 0;
-            QString details;
-            for (const DnsProbeTargetResult& probeResult : report.targets) {
-                if (!probeResult.succeeded) {
-                    details += QString("<tr><td width='16'><span style='color:#ff4d4d;'>&#9679;</span></td>"
-                                       "<td width='105'>%1:</td><td style='color:#777;'>- %2</td></tr>")
-                                   .arg(probeResult.target.label.toHtmlEscaped(),
-                                        probeResult.error.toHtmlEscaped());
-                    continue;
-                }
-                const QString color = probeResult.latencyMs > 250 ? "#ff4d4d"
-                                     : probeResult.latencyMs > 80 ? "#fbbf24" : "#4ade80";
-                details += QString("<tr><td width='16'><span style='color:%1;'>&#9679;</span></td>"
-                                   "<td width='105'>%2:</td><td style='color:#777;'>- %3 ms</td></tr>")
-                               .arg(color, probeResult.target.label.toHtmlEscaped())
-                               .arg(probeResult.latencyMs);
-                totalLatency += probeResult.latencyMs;
-                ++successCount;
-            }
-
-            const int failures = report.targets.size() - successCount;
-            result += failures == 0
-                ? "<span style='color:#4ade80;'><b>Status:</b> Resolver returned usable answers.</span><br>"
-                : QString("<span style='color:#fbbf24;'><b>Resolver warning:</b> %1 domain(s) had no usable answer.</span><br>").arg(failures);
-            if (successCount > 0)
-                result += QString("<span style='color:#888;'>Average latency:</span> %1 ms<br>")
-                              .arg(totalLatency / successCount);
-            return result + "<hr><table width='100%' cellspacing='0' cellpadding='1'>" + details + "</table></div>";
-        }));
-
-#if 0 // Replaced by DnsProbe; retained only until the next source-format sweep.
-        watcher->setFuture(QtConcurrent::run([ip, port]() -> QString {
-            QString result = "<div style='line-height: 1.2;'>";
-
-            LOG_INFO0("DNS test worker: checking internet connectivity");
-            {
-                QTcpSocket s;
-                s.connectToHost("8.8.8.8", 53);
-                if (!s.waitForConnected(2000)) {
-                    LOG_WARN0("DNS test: internet connectivity check FAILED");
-                    return result + "<span style='color:#ff4d4d; font-size: 14px;'><b>No Internet Connection</b><br><span style='font-size:12px; color:#888;'>Please check your network settings.</span></span></div>";
-                }
-            }
-            LOG_INFO0("DNS test: internet connectivity OK");
-
-            struct Target { QString label; QString host; };
-            const QList<Target> targets = {
-                { "Discord",      "discord.com"         },
-                { "Discord GW",   "gateway.discord.gg"  },
-                { "Roblox",       "roblox.com"          },
-                { "Twitter",      "twitter.com"         },
-                { "Reddit",       "reddit.com"          },
-                { "YouTube",      "youtube.com"         },
-                { "Instagram",    "instagram.com"       },
-                { "Telegram",     "telegram.org"        },
-                { "GitHub",       "github.com"          },
-                { "Spotify",      "spotify.com"         },
-                { "Steam",        "steamcommunity.com"  },
-                { "EA",           "ea.com"              }
-            };
-
-            qint64 totalLatency = 0;
-            int successCount = 0;
-            int failCount = 0;
-
-            QString details = "";
-
-            for (const auto& t : targets) {
-                QByteArray query;
-                query.append("\xAB\xCD\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00", 12);
-                for (const QString& part : t.host.split('.')) {
-                    QByteArray p = part.toLatin1();
-                    query.append(static_cast<char>(p.size()));
-                    query.append(p);
-                }
-                query.append('\x00');
-                query.append("\x00\x01\x00\x01", 4);
-
-                QUdpSocket udp;
-                udp.bind(0);
-
-                QElapsedTimer timer;
-                timer.start();
-                udp.writeDatagram(query, QHostAddress(ip), static_cast<quint16>(port));
-
-                QString resolved;
-                qint64 pingMs = -1;
-
-                if (udp.waitForReadyRead(3000)) {
-                    QByteArray resp(512, 0);
-                    qint64 n = udp.readDatagram(resp.data(), resp.size());
-                    pingMs = timer.elapsed();
-
-                    if (n > 12) {
-                        int i = 12;
-                        while (i < n && resp[i] != '\x00')
-                            i += (uint8_t)resp[i] + 1;
-                        i += 5;
-
-                        int answers = ((uint8_t)resp[6] << 8) | (uint8_t)resp[7];
-                        for (int a = 0; a < answers && i + 12 <= n; ++a) {
-                            if (i < n && (resp[i] & 0xC0) == 0xC0) i += 2;
-                            else { while (i < n && resp[i]) i++; i++; }
-
-                            if (i + 10 > n) break;
-                            uint16_t type  = ((uint8_t)resp[i] << 8) | (uint8_t)resp[i+1];
-                            i += 8;
-                            uint16_t rdlen = ((uint8_t)resp[i] << 8) | (uint8_t)resp[i+1];
-                            i += 2;
-
-                            if (type == 1 && rdlen == 4 && i + 4 <= n) {
-                                resolved = QString("%1.%2.%3.%4")
-                                .arg((uint8_t)resp[i])  .arg((uint8_t)resp[i+1])
-                                    .arg((uint8_t)resp[i+2]).arg((uint8_t)resp[i+3]);
-                                break;
-                            }
-                            i += rdlen;
-                        }
-                    }
-                }
-
-                if (resolved.isEmpty()) {
-                    details += QString("<tr>"
-                                       "<td width='16'><span style='color:#ff4d4d; font-size: 14px;'>●</span></td>"
-                                       "<td width='90'><span style='color:#ccc;'>%1:</span></td>"
-                                       "<td><span style='color:#666; font-size: 11px;'>- Timeout</span></td>"
-                                       "</tr>").arg(t.label);
-                    failCount++;
-                } else {
-                    QString color = "#4ade80";
-                    if (pingMs > 250) color = "#ff4d4d";
-                    else if (pingMs > 80) color = "#fbbf24";
-
-                    details += QString("<tr>"
-                                       "<td width='16'><span style='color:%1; font-size: 14px;'>●</span></td>"
-                                       "<td width='90'><span style='color:#ccc;'>%2:</span></td>"
-                                       "<td><span style='color:#777; font-size: 11px;'>- %3ms</span></td>"
-                                       "</tr>").arg(color, t.label).arg(pingMs);
-                    totalLatency += pingMs;
-                    successCount++;
-                }
-            }
-
-            result += QString("<span style='font-size: 14px; font-weight: 600; color: #ffffff;'>Target Server: %1:%2</span><br>").arg(ip, QString::number(port));
-
-            if (failCount > 0) {
-                result += QString("<span style='color:#ff4d4d; font-size: 12px;'><b>Warning:</b> %1 domain(s) failed. ISP may be blocking.</span><br>").arg(failCount);
-            } else {
-                result += "<span style='color:#4ade80; font-size: 12px;'><b>Status:</b> All tests passed.</span><br>";
-            }
-
-            if (successCount > 0) {
-                qint64 avgLatency = totalLatency / successCount;
-                QString avgColor = (avgLatency > 150) ? "#fbbf24" : "#4ade80";
-                result += QString("<span style='color:#888; font-size: 12px;'>Avg Latency:</span> <span style='color:%1; font-size: 12px; font-weight:600;'>%2 ms</span>").arg(avgColor).arg(avgLatency);
-            }
-
-            result += "<hr style='margin: 8px 0 4px 0; border: none; border-top: 1px solid rgba(255,255,255,0.08);'>";
-
-            result += "<table width='100%' cellspacing='0' cellpadding='1'>";
-            result += details;
-            result += "</table>";
-
-            result += "</div>";
-            return result;
-        }));
-#endif
-    };
-
-    if (wasRunning) {
-        LOG_INFO0("DNS test: stopping engine before test to prevent WinDivert from intercepting test packets");
-        auto* conn = new QMetaObject::Connection();
-        *conn = connect(m_engine, &BypassEngine::stopped,
-                        this, [safeThis, conn, startTest]() {
-                            QObject::disconnect(*conn);
-                            delete conn;
-                            LOG_INFO0("DNS test: engine stopped - starting test");
-                            if (safeThis) startTest();
-                        }, Qt::SingleShotConnection);
-        m_engine->stop();
-    } else {
-        startTest();
+    if (!kProbeNeedsEngineOff || !m_engine->isRunning()) {
+        runDnsProbe(false);
+        return;
     }
+
+    // The engine would intercept the test queries, so stop it first.
+    connect(m_engine, &BypassEngine::stopped, this, [this] { runDnsProbe(true); },
+            Qt::SingleShotConnection);
+    m_engine->stop();
+}
+
+void SettingsWindow::runDnsProbe(bool restartEngine)
+{
+    const QString ip = m_dnsServer->text().trimmed();
+    const int port   = m_dnsPort->value();
+    LOG_INFO("DNS test started: %1:%2", ip, port);
+
+    auto* watcher = new QFutureWatcher<QString>(this);
+    connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher, restartEngine] {
+        m_dnsStatusLabel->setHtml(watcher->result());
+        m_checkBtn->setEnabled(true);
+        watcher->deleteLater();
+        if (restartEngine)
+            m_engine->start();
+    });
+    watcher->setFuture(QtConcurrent::run(probeHtml, ip, port));
 }
 
 void SettingsWindow::onResetDefaults()
 {
-    LOG_INFO0("SettingsWindow: Reset to defaults requested");
-
-    QMessageBox::StandardButton reply;
-    reply = QMessageBox::question(this, "Reset to Defaults",
-                                  "Are you sure you want to reset all settings to their default values?\n\n"
-                                  "(Changes will not take effect until you click 'Apply').",
-                                  QMessageBox::Yes | QMessageBox::No);
-
-    if (reply == QMessageBox::Yes) {
-        BypassConfig defaultConfig;
-
-        loadToUi(defaultConfig);
-        LOG_INFO0("SettingsWindow: UI reset to default configuration");
-    }
+    const auto reply = QMessageBox::question(this, "Reset to Defaults",
+        "Reset all settings to their default values?\n\n"
+        "Changes take effect only after you click Apply.");
+    if (reply == QMessageBox::Yes)
+        loadToUi(BypassConfig{});
 }

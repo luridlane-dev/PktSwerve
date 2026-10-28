@@ -1,414 +1,345 @@
 #include "PopupWindow.h"
+#include "app/Logger.h"
+#include "app/Theme.h"
+#include "app/ToggleSwitch.h"
+#include "core/BypassEngine.h"
+
+#include <QApplication>
+#include <QFrame>
+#include <QGraphicsOpacityEffect>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPropertyAnimation>
+#include <QPushButton>
+#include <QScreen>
+#include <QStyle>
+#include <QTimer>
+#include <QVBoxLayout>
+
 #ifdef Q_OS_WIN
 #include <windows.h>
-#endif
+#else
 #include <cstdlib>
-#include "core/BypassEngine.h"
-#include "app/ToggleSwitch.h"
-#include "app/Logger.h"
-#include <QApplication>
-#include <QStyle>
-#include <QScreen>
-#include <QPushButton>
-#include <QLabel>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QFrame>
-#include <QPainter>
-#include <QPainterPath>
-#include <QGraphicsOpacityEffect>
-#include <QPropertyAnimation>
-#include <QParallelAnimationGroup>
-#include <QGraphicsDropShadowEffect>
-#include <QSequentialAnimationGroup>
-#include <QFocusEvent>
-#include <QMouseEvent>
-#include <QTimer>
+#endif
 
-static QString fmtBytes(quint64 b)
+namespace {
+
+constexpr int kWidth      = 300;
+constexpr int kLogoSize   = 72;
+constexpr int kRowHeight  = 44;
+constexpr int kEdge       = 16;
+constexpr int kFadeMs     = 300;
+
+const char* kStyle = R"(
+    QLabel#statusLabel { font-size: 15px; font-weight: 600; color: @subtext; }
+    QLabel#statusLabel[state="on"]    { color: @green; }
+    QLabel#statusLabel[state="error"] { color: @red; }
+
+    QFrame#card { background: @card; border-radius: 12px; }
+    QFrame#separator { background: @line; }
+
+    QLabel#rowTitle { font-size: 14px; }
+    QLabel#rowTitle[danger="true"] { color: @red; }
+    QLabel#rowValue { font-size: 14px; color: @subtext; }
+
+    QPushButton#rowBtn {
+        background: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 0;
+    }
+    QPushButton#rowBtn:hover   { background: @fill; }
+    QPushButton#rowBtn:pressed { background: @fillHigh; }
+    QPushButton#rowBtn[edge="first"] { border-top-left-radius: 12px; border-top-right-radius: 12px; }
+    QPushButton#rowBtn[edge="last"]  { border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }
+)";
+
+QPixmap loadLogo(const QString& path, qreal dpr)
 {
-    if (b < 1024)        return QString("%1 B").arg(b);
-    if (b < 1024 * 1024) return QString("%1 KB").arg(b / 1024);
-    return QString("%1 MB").arg(b / (1024 * 1024));
+    QPixmap px(path);
+    if (px.isNull()) {
+        LOG_ERROR("Resource loading failed! Path: %1", path);
+        return px;
+    }
+    px = px.scaled(QSize(kLogoSize, kLogoSize) * dpr, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    px.setDevicePixelRatio(dpr);
+    return px;
+}
+
+QString modeName(BypassMode mode)
+{
+    switch (mode) {
+    case BypassMode::Disabled:      return "Disabled";
+    case BypassMode::BlacklistMode: return "Selected Sites";
+    case BypassMode::WhitelistMode: return "Whitelist";
+    case BypassMode::GlobalMode:    return "Global";
+    }
+    return {};
+}
+
+QLabel* makeLabel(const QString& text, const char* name, bool transparentToMouse = false)
+{
+    auto* label = new QLabel(text);
+    label->setObjectName(name);
+    label->setAttribute(Qt::WA_TransparentForMouseEvents, transparentToMouse);
+    return label;
+}
+
+QWidget* makeValueRow(const QString& title, QLabel* value)
+{
+    auto* row = new QWidget;
+    row->setFixedHeight(kRowHeight);
+    auto* lay = new QHBoxLayout(row);
+    lay->setContentsMargins(kEdge, 0, kEdge, 0);
+    lay->addWidget(makeLabel(title, "rowTitle"));
+    lay->addStretch();
+    lay->addWidget(value);
+    return row;
+}
+
+QPushButton* makeButtonRow(const QString& title, const char* edge, bool danger, bool chevron)
+{
+    auto* btn = new QPushButton;
+    btn->setObjectName("rowBtn");
+    btn->setProperty("edge", edge);
+    btn->setFixedHeight(kRowHeight);
+    btn->setCursor(Qt::PointingHandCursor);
+
+    auto* lay = new QHBoxLayout(btn);
+    lay->setContentsMargins(kEdge, 0, kEdge, 0);
+    QLabel* label = makeLabel(title, "rowTitle", true);
+    label->setProperty("danger", danger);
+    lay->addWidget(label);
+    lay->addStretch();
+    if (chevron)
+        lay->addWidget(makeLabel("›", "rowValue", true));
+    return btn;
+}
+
+QFrame* makeCard(const QList<QWidget*>& rows)
+{
+    auto* card = new QFrame;
+    card->setObjectName("card");
+    auto* lay = new QVBoxLayout(card);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(0);
+
+    for (QWidget* row : rows) {
+        if (row != rows.first()) {
+            auto* sep = new QFrame;
+            sep->setObjectName("separator");
+            sep->setFixedHeight(1);
+            lay->addWidget(sep);
+        }
+        lay->addWidget(row);
+    }
+    return card;
+}
+
+void repolish(QWidget* w)
+{
+    w->style()->unpolish(w);
+    w->style()->polish(w);
+}
+
 }
 
 
 PopupWindow::PopupWindow(BypassEngine* engine, QWidget* parent)
-    : QWidget(parent,
-              Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint),
-    m_engine(engine)
+    : QWidget(parent, Qt::Tool | Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint),
+      m_engine(engine)
 {
     setAttribute(Qt::WA_TranslucentBackground);
-    setAttribute(Qt::WA_DeleteOnClose, false);
-    setFixedSize(300, 380);
+
+    const qreal dpr = devicePixelRatioF();
+    m_activeLogo = loadLogo(":/icons/active.png", dpr);
+    m_idleLogo   = loadLogo(":/icons/inactive.png", dpr);
 
     buildUi();
-
     qApp->installEventFilter(this);
 
-    connect(m_engine, &BypassEngine::started,       this, &PopupWindow::onEngineStarted);
-    connect(m_engine, &BypassEngine::stopped,       this, &PopupWindow::onEngineStopped);
-    connect(m_engine, &BypassEngine::errorOccurred, this, &PopupWindow::onEngineError);
-    connect(m_engine, &BypassEngine::statsUpdated,  this, &PopupWindow::onStatsUpdated);
+    connect(m_engine, &BypassEngine::started,       this, &PopupWindow::updateState);
+    connect(m_engine, &BypassEngine::stopped,       this, &PopupWindow::updateState);
     connect(m_engine, &BypassEngine::configChanged, this, &PopupWindow::updateState);
+    connect(m_engine, &BypassEngine::errorOccurred, this, &PopupWindow::onEngineError);
 
     connect(qApp, &QApplication::focusWindowChanged, this, [this](QWindow* win) {
-        if (isVisible() && win == nullptr) {
+        if (isVisible() && !win)
             hide();
-        }
     });
 
-    LOG_INFO0("PopupWindow created");
-    updateState();
+    applyState();
 }
 
-
-bool PopupWindow::eventFilter(QObject* obj, QEvent* e)
+bool PopupWindow::eventFilter(QObject*, QEvent* e)
 {
-    Q_UNUSED(obj)
-    if (isVisible() && e->type() == QEvent::MouseButtonPress) {
-        QPoint globalPos = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
-        if (!geometry().contains(globalPos)) {
+    if (!isVisible())
+        return false;
+
+    switch (e->type()) {
+    case QEvent::MouseButtonPress:
+        if (!geometry().contains(static_cast<QMouseEvent*>(e)->globalPosition().toPoint()))
             hide();
-        }
-    }
-    if (isVisible()
-        && (e->type() == QEvent::ApplicationDeactivate
-            || e->type() == QEvent::WindowDeactivate)) {
+        break;
+    case QEvent::ApplicationDeactivate:
+    case QEvent::WindowDeactivate:
         hide();
+        break;
+    default:
+        break;
     }
     return false;
 }
 
-
 void PopupWindow::showAtTray(const QRect& trayGeo)
 {
-
-    setFixedSize(320, 420);
     show();
     raise();
     activateWindow();
 
     QScreen* screen = QGuiApplication::screenAt(trayGeo.center());
-    if (!screen) screen = QGuiApplication::primaryScreen();
-    QRect avail = screen->availableGeometry();
+    if (!screen)
+        screen = QGuiApplication::primaryScreen();
+    const QRect avail = screen->availableGeometry();
 
-    int x = avail.right() - width() - 12;
-    int y = avail.bottom() - height() - 12;
+    // Tray at the top (macOS menu bar): open under the icon. Otherwise bottom-right.
+    const bool trayOnTop = trayGeo.isValid() && trayGeo.center().y() < avail.center().y();
+    int x = trayOnTop ? trayGeo.center().x() - width() / 2 : avail.right() - width() - 12;
+    const int y = trayOnTop ? avail.top() + 8 : avail.bottom() - height() - 12;
 
-    // macOS menu bar (or a top taskbar): open just below the icon instead of
-    // in the bottom-right corner.
-    if (trayGeo.isValid() && trayGeo.center().y() < avail.center().y()) {
-        x = trayGeo.center().x() - width() / 2;
-        y = avail.top() + 8;
-    }
-
-    if (x < avail.left()) x = avail.left() + 8;
-    if (x + width() > avail.right()) x = avail.right() - width() - 8;
-
+    x = qBound(avail.left() + 8, x, avail.right() - width() - 8);
     move(x, y);
     setFocus();
 }
-
 
 void PopupWindow::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
-    QPainterPath path;
-    path.addRoundedRect(rect().adjusted(1, 1, -1, -1), 14, 14);
-
-    p.fillPath(path, Qt::black);
-    p.setPen(QPen(QColor(255, 255, 255, 20), 1));
-    p.drawPath(path);
-}
-
-void PopupWindow::focusOutEvent(QFocusEvent* e)
-{
-    LOG_DEBUG("PopupWindow focusOutEvent | reason=%1", static_cast<int>(e->reason()));
-    QWidget::focusOutEvent(e);
-
-    QTimer::singleShot(0, this, [this]() {
-        if (isVisible() && !isActiveWindow())
-            hide();
-    });
+    p.setBrush(Theme::bg);
+    p.setPen(QPen(QColor(255, 255, 255, 36), 1));
+    p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 18, 18);
 }
 
 void PopupWindow::buildUi()
 {
-    setStyleSheet(R"(
-        QWidget { color: #e0e0e0; font-family: 'Segoe UI', sans-serif; }
+    setStyleSheet(Theme::style(kStyle));
 
-        QLabel#brandLabel { font-size: 16px; font-weight: 700; color: #ffffff; letter-spacing: 0.3px; }
-        QLabel#devLabel   { font-size: 10px; color: #444444; }
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(kEdge, 22, kEdge, 14);
+    root->setSpacing(0);
+    root->setSizeConstraint(QLayout::SetFixedSize);
 
-        QLabel#statusLabel              { font-size: 13px; font-weight: 500; color: #555555; }
-        QLabel#statusLabel[active="true"] { color: #4ade80; font-weight: 700; }
+    m_hero = new QWidget;
+    m_hero->setFixedWidth(kWidth - 2 * kEdge);
+    auto* hero = new QVBoxLayout(m_hero);
+    hero->setContentsMargins(0, 0, 0, 0);
+    hero->setSpacing(0);
 
-        QLabel#dnsLabel              { font-size: 17px; font-weight: 600; color: #444444; }
-        QLabel#dnsLabel[active="true"] { color: #ffffff; }
+    m_logoLabel = new QLabel;
+    m_logoLabel->setFixedSize(kLogoSize, kLogoSize);
+    hero->addWidget(m_logoLabel, 0, Qt::AlignHCenter);
+    hero->addSpacing(14);
 
-        QPushButton#settingsBtn {
-            background: transparent;
-            border: none;
-            color: #444444;
-            font-size: 18px;
-            padding: 0;
-        }
-        QPushButton#settingsBtn:hover { color: #ffffff; }
+    m_toggle = new ToggleSwitch;
+    connect(m_toggle, &ToggleSwitch::clicked, this, &PopupWindow::onToggleClicked);
+    hero->addWidget(m_toggle, 0, Qt::AlignHCenter);
+    hero->addSpacing(10);
 
-        QPushButton#quitBtn {
-            background: #0a0a0a;
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 10px;
-            padding: 10px;
-            font-size: 12px;
-            color: #666666;
-        }
-        QPushButton#quitBtn:hover { background: #141414; color: #ffffff; border-color: #444444; }
-    )");
-
-    QWidget* inner = new QWidget(this);
-    QVBoxLayout* root = new QVBoxLayout(this);
-    root->setContentsMargins(8, 8, 8, 8);
-    root->addWidget(inner);
-
-    QVBoxLayout* lay = new QVBoxLayout(inner);
-    lay->setContentsMargins(24, 18, 24, 20);
-    lay->setSpacing(0);
-
-    QHBoxLayout* header = new QHBoxLayout();
-
-    QLabel* brand = new QLabel("PktSwerve");
-    brand->setObjectName("brandLabel");
-    brand->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-
-    QPushButton* settingsBtn = new QPushButton("⚙");
-    settingsBtn->setObjectName("settingsBtn");
-    settingsBtn->setFixedSize(28, 28);
-    settingsBtn->setCursor(Qt::PointingHandCursor);
-
-    header->addWidget(brand, 0, Qt::AlignVCenter);
-    header->addStretch();
-    header->addWidget(settingsBtn, 0, Qt::AlignVCenter);
-
-    lay->addLayout(header);
-    lay->addSpacing(16);
-
-    m_logoLabel = new QLabel();
-    m_logoLabel->setAlignment(Qt::AlignHCenter | Qt::AlignVCenter);
-    m_logoLabel->setFixedHeight(110);
-
-    lay->addWidget(m_logoLabel, 0, Qt::AlignHCenter);
-    lay->addSpacing(20);
-
-    m_toggleBtn = new ToggleSwitch(this);
-    connect(m_toggleBtn, &ToggleSwitch::clicked, this, &PopupWindow::onToggleClicked);
-    lay->addWidget(m_toggleBtn, 0, Qt::AlignHCenter);
-    lay->addSpacing(12);
-
-    m_statusLabel = new QLabel("Disconnected");
-    m_statusLabel->setObjectName("statusLabel");
-    m_statusLabel->setProperty("active", false);
+    m_statusLabel = makeLabel({}, "statusLabel");
     m_statusLabel->setAlignment(Qt::AlignHCenter);
-    lay->addWidget(m_statusLabel);
-    lay->addSpacing(24);
+    hero->addWidget(m_statusLabel);
 
-    m_dnsLabel = new QLabel();
-    m_dnsLabel->setObjectName("dnsLabel");
-    m_dnsLabel->setAlignment(Qt::AlignHCenter);
-    lay->addWidget(m_dnsLabel);
-    lay->addSpacing(20);
+    m_heroFade = new QGraphicsOpacityEffect(m_hero);
+    m_hero->setGraphicsEffect(m_heroFade);
+    m_fade = new QPropertyAnimation(m_heroFade, "opacity", this);
+    m_fade->setDuration(kFadeMs);
+    m_fade->setKeyValueAt(0.0, 1.0);
+    m_fade->setKeyValueAt(0.4, 0.0);
+    m_fade->setKeyValueAt(1.0, 1.0);
 
-    QPushButton* quitBtn = new QPushButton("✕  Quit");
-    quitBtn->setObjectName("quitBtn");
-    quitBtn->setCursor(Qt::PointingHandCursor);
-    lay->addWidget(quitBtn);
-    lay->addSpacing(14);
+    root->addWidget(m_hero);
+    root->addSpacing(20);
 
-    QLabel* developerLabel = new QLabel("Developed by Lurid Lane");
-    developerLabel->setObjectName("developerLabel");
-    developerLabel->setAlignment(Qt::AlignHCenter);
-    developerLabel->setStyleSheet("color: #888; font-size: 11px;");
-    lay->addWidget(developerLabel);
+    m_dnsValue  = makeLabel({}, "rowValue");
+    m_modeValue = makeLabel({}, "rowValue");
+    root->addWidget(makeCard({makeValueRow("DNS", m_dnsValue), makeValueRow("Mode", m_modeValue)}));
+    root->addSpacing(12);
 
-    connect(settingsBtn, &QPushButton::clicked, this, &PopupWindow::onSettingsClicked);
+    QPushButton* settingsBtn = makeButtonRow("Settings", "first", false, true);
+    QPushButton* quitBtn     = makeButtonRow("Quit", "last", true, false);
+    connect(settingsBtn, &QPushButton::clicked, this, [this] { hide(); emit settingsRequested(); });
     connect(quitBtn,     &QPushButton::clicked, this, &PopupWindow::onQuitClicked);
+    root->addWidget(makeCard({settingsBtn, quitBtn}));
+    root->addSpacing(14);
+
+    QLabel* credit = makeLabel("Developed by Lurid Lane", "meta");
+    credit->setAlignment(Qt::AlignHCenter);
+    root->addWidget(credit);
+}
+
+void PopupWindow::setStatus(const QString& state, const QString& text)
+{
+    m_statusLabel->setProperty("state", state);
+    m_statusLabel->setText(text);
+    repolish(m_statusLabel);
 }
 
 void PopupWindow::updateState()
 {
-    if (!m_engine) {
-        LOG_ERROR("PopupWindow: m_engine is null in updateState()");
-        return;
-    }
-
-    bool running = m_engine->isRunning();
-    m_toggleBtn->setActive(running);
-
+    m_toggle->setActive(m_engine->isRunning());
     if (!isVisible()) {
-        applyVisualUpdates(running);
+        applyState();
         return;
     }
 
-    if (m_isAnimating) {
-        m_hasPendingState = true;
-        m_pendingState = running;
-        return;
-    }
-
-    m_isAnimating = true;
-
-    QList<QWidget*> widgetsToAnimate = { m_logoLabel, m_statusLabel, m_dnsLabel };
-
-    auto* fadeOutGroup = new QParallelAnimationGroup(this);
-    auto* fadeInGroup = new QParallelAnimationGroup(this);
-
-    int delayMs = 0;
-    const int staggerStepMs = 40;
-
-    for (QWidget* widget : widgetsToAnimate) {
-        if (!widget) continue;
-
-        auto* effect = new QGraphicsOpacityEffect(widget);
-        widget->setGraphicsEffect(effect);
-
-        auto* fadeOut = new QPropertyAnimation(effect, "opacity");
-        fadeOut->setDuration(120);
-        fadeOut->setStartValue(1.0);
-        fadeOut->setEndValue(0.0);
-        fadeOut->setEasingCurve(QEasingCurve::InSine);
-        fadeOutGroup->addAnimation(fadeOut);
-
-        auto* seq = new QSequentialAnimationGroup(fadeInGroup);
-        if (delayMs > 0) {
-            seq->addPause(delayMs);
-        }
-
-        auto* fadeIn = new QPropertyAnimation(effect, "opacity");
-        fadeIn->setDuration(200);
-        fadeIn->setStartValue(0.0);
-        fadeIn->setEndValue(1.0);
-        fadeIn->setEasingCurve(QEasingCurve::OutBack);
-        seq->addAnimation(fadeIn);
-
-        fadeInGroup->addAnimation(seq);
-
-        delayMs += staggerStepMs;
-    }
-
-    connect(fadeOutGroup, &QParallelAnimationGroup::finished, this, [this, running, fadeInGroup]() {
-        applyVisualUpdates(running);
-        fadeInGroup->start(QAbstractAnimation::DeleteWhenStopped);
-    });
-
-    connect(fadeInGroup, &QParallelAnimationGroup::finished, this, [this, widgetsToAnimate]() {
-        for (QWidget* widget : widgetsToAnimate) {
-            if (!widget) continue;
-            widget->setGraphicsEffect(nullptr);
-        }
-
-        m_isAnimating = false;
-
-        if (m_hasPendingState) {
-            m_hasPendingState = false;
-            if (m_engine && m_engine->isRunning() == m_pendingState) {
-                updateState();
-            }
-        }
-    });
-
-    fadeOutGroup->start(QAbstractAnimation::DeleteWhenStopped);
+    // Swap the content while the hero is fully faded out.
+    m_fade->stop();
+    m_fade->start();
+    QTimer::singleShot(kFadeMs * 4 / 10, this, &PopupWindow::applyState);
 }
 
-void PopupWindow::applyVisualUpdates(bool running)
+void PopupWindow::applyState()
 {
-    if (m_statusLabel) {
-        m_statusLabel->setProperty("active", running);
-        m_statusLabel->style()->unpolish(m_statusLabel);
-        m_statusLabel->style()->polish(m_statusLabel);
-        m_statusLabel->setText(running ? "Connected" : "Disconnected");
-    }
+    const bool running = m_engine->isRunning();
+    const BypassConfig& cfg = m_engine->config();
 
-    if (m_dnsLabel) {
-        m_dnsLabel->setProperty("active", running);
-        m_dnsLabel->style()->unpolish(m_dnsLabel);
-        m_dnsLabel->style()->polish(m_dnsLabel);
-
-        const auto& cfg = m_engine->config();
-        m_dnsLabel->setText(cfg.dnsRedirect ? QString("%1").arg(cfg.dnsServer) : "DNS redirect disabled");
-    }
-
-    if (m_logoLabel) {
-        QString resPath = running ? ":/icons/active.png" : ":/icons/inactive.png";
-        QPixmap logoPixmap(resPath);
-
-        if (logoPixmap.isNull()) {
-            LOG_ERROR("Resource loading failed! Path: %1", resPath);
-        } else {
-            m_logoLabel->setPixmap(logoPixmap.scaled(100, 100, Qt::KeepAspectRatio, Qt::SmoothTransformation));
-        }
-    }
+    setStatus(running ? "on" : "off", running ? "Connected" : "Disconnected");
+    m_logoLabel->setPixmap(running ? m_activeLogo : m_idleLogo);
+    m_dnsValue->setText(cfg.dnsRedirect ? cfg.dnsServer : "Off");
+    m_modeValue->setText(modeName(cfg.mode));
 }
-
 
 void PopupWindow::onToggleClicked()
 {
-    if (m_engine->isRunning()) {
-        LOG_INFO0("PopupWindow: toggle clicked - stopping engine");
+    LOG_INFO("PopupWindow: toggle clicked - %1", m_engine->isRunning() ? "stopping" : "starting");
+    if (m_engine->isRunning())
         m_engine->stop();
-    } else {
-        LOG_INFO0("PopupWindow: toggle clicked - starting engine");
+    else
         m_engine->start();
-    }
 }
 
-void PopupWindow::onEngineStarted()
+void PopupWindow::onEngineError(const QString& message)
 {
-    LOG_INFO0("PopupWindow: engine started signal received");
-    updateState();
-}
-
-void PopupWindow::onEngineStopped()
-{
-    LOG_INFO0("PopupWindow: engine stopped signal received");
-    updateState();
-}
-
-void PopupWindow::onEngineError(const QString& msg)
-{
-    LOG_ERROR("PopupWindow: engine error received: %1", msg);
-    m_statusLabel->setText("Error");
-    m_statusLabel->setStyleSheet("font-size:12px; color:#e05555;");
-}
-
-void PopupWindow::onStatsUpdated(quint64 packets, quint64 bytes)
-{
-    Q_UNUSED(packets)
-    Q_UNUSED(bytes)
-}
-
-void PopupWindow::onSettingsClicked()
-{
-    LOG_INFO0("PopupWindow: settings clicked");
-    hide();
-    emit settingsRequested();
+    LOG_ERROR("PopupWindow: engine error received: %1", message);
+    setStatus("error", "Error");
 }
 
 void PopupWindow::onQuitClicked()
 {
     LOG_INFO0("PopupWindow: quit clicked");
     hide();
-    if (m_engine && m_engine->isRunning()) {
+    if (m_engine->isRunning()) {
         m_engine->blockSignals(true);
         m_engine->stop();
     }
 
+    // Skip Qt teardown; the engine is already stopped.
 #ifdef Q_OS_WIN
     ::TerminateProcess(::GetCurrentProcess(), 0);
 #else
-    // Same hard exit as on Windows; the engine (and its pf rules) is already stopped.
     std::_Exit(0);
 #endif
 }
-
