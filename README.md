@@ -54,6 +54,14 @@ For a release build, extract the complete package to a directory and run `PktSwe
 
 If the package does not contain the WinDivert runtime files, copy `WinDivert.dll` and `WinDivert64.sys` beside `PktSwerve.exe` before launching it.
 
+### macOS
+
+1. Open `PktSwerve-macOS.dmg`.
+2. Right-click `Install.command` and choose Open (needed once, the script is unsigned). It copies the app to `/Applications`, removes the quarantine flag and starts it.
+3. Or drag `PktSwerve.app` to Applications yourself, then run `xattr -dr com.apple.quarantine /Applications/PktSwerve.app` once.
+
+The app lives in the menu bar and asks for the administrator password when you start it.
+
 ## Building
 
 From a PowerShell or command prompt in the repository root:

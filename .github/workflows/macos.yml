@@ -44,10 +44,16 @@ jobs:
           macdeployqt build/PktSwerve.app
           codesign --force --deep --sign - build/PktSwerve.app
 
-      - name: Zip
-        run: ditto -c -k --keepParent build/PktSwerve.app PktSwerve-macOS.zip
+      - name: Create DMG
+        run: |
+          mkdir dmg
+          cp -R build/PktSwerve.app dmg/
+          cp packaging/macos/Install.command dmg/
+          chmod +x dmg/Install.command
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname PktSwerve -srcfolder dmg -ov -format UDZO PktSwerve-macOS.dmg
 
       - uses: actions/upload-artifact@v4
         with:
           name: PktSwerve-macOS
-          path: PktSwerve-macOS.zip
+          path: PktSwerve-macOS.dmg
