@@ -68,6 +68,7 @@ TrayApplication::~TrayApplication()
     LOG_INFO0("TrayApplication destroying");
     if (m_engine) m_engine->stop();
     if (m_tray) m_tray->hide();
+    delete m_menu;
 }
 
 bool TrayApplication::init()
@@ -135,6 +136,7 @@ void TrayApplication::onTrayActivated(QSystemTrayIcon::ActivationReason reason)
 {
 #ifdef Q_OS_MACOS
     if (reason == QSystemTrayIcon::Context) {
+        m_popup->hide();
         m_menu->popup(QCursor::pos());
         return;
     }

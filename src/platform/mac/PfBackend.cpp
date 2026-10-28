@@ -63,6 +63,7 @@ const QString kPfctl        = QStringLiteral("/sbin/pfctl");
 
 constexpr int kMaxConnections   = 1000;   // one thread and two fds each
 constexpr int kConnectTimeoutMs = 10000;
+constexpr int kFirstFlightTimeoutMs = 60000;
 constexpr int kRelayBufferSize  = 16384;
 constexpr int kDnsReplySize     = 8192;
 
@@ -274,10 +275,13 @@ void relay(PfShared& sh, int a, int b)
 
     Lane lanes[2] = {{a, b}, {b, a}};
     while (!sh.stop && !(lanes[0].done() && lanes[1].done())) {
-        auto events = [&](const Lane& reads, const Lane& writes) -> short {
-            return (reads.wantsRead() ? POLLIN : 0) | (writes.pending() ? POLLOUT : 0);
+        // A socket with nothing to wait for is left out (-1), so a half-closed
+        // peer does not make poll() return POLLHUP over and over.
+        auto watch = [&](int fd, const Lane& reads, const Lane& writes) {
+            const short events = (reads.wantsRead() ? POLLIN : 0) | (writes.pending() ? POLLOUT : 0);
+            return pollfd{events ? fd : -1, events, 0};
         };
-        pollfd fds[2] = {{a, events(lanes[0], lanes[1]), 0}, {b, events(lanes[1], lanes[0]), 0}};
+        pollfd fds[2] = {watch(a, lanes[0], lanes[1]), watch(b, lanes[1], lanes[0])};
 
         const int r = ::poll(fds, 2, 500);
         if (r < 0) {
@@ -287,7 +291,7 @@ void relay(PfShared& sh, int a, int b)
 
         for (int i = 0; i < 2; ++i) {
             const short re = fds[i].revents;
-            if ((re & (POLLERR | POLLNVAL)) || ((re & POLLHUP) && !fds[i].events))
+            if (re & (POLLERR | POLLNVAL))
                 return;
             Lane& reads  = lanes[i];        // reads from fds[i]
             Lane& writes = lanes[1 - i];    // writes to fds[i]
@@ -314,9 +318,10 @@ void relay(PfShared& sh, int a, int b)
 bool readFirstFlight(PfShared& sh, int fd, bool tls, QByteArray& out)
 {
     char buf[16384];
-    // Browsers pre-open connections and may sit idle for a long time before
-    // the first byte, so there is deliberately no timeout here.
-    while (!sh.stop) {
+    // Browsers pre-open connections that may stay idle; give up after a while
+    // so they do not hold a thread forever. They simply reconnect.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kFirstFlightTimeoutMs);
+    while (!sh.stop && std::chrono::steady_clock::now() < deadline) {
         pollfd p{fd, POLLIN, 0};
         const int r = ::poll(&p, 1, 500);
         if (r < 0) { if (errno == EINTR) continue; return false; }
@@ -480,16 +485,16 @@ void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
     if ((ip >> 24) == 127 || ip == 0)
         return;   // would loop straight back into the proxy
 
+    const bool tls = (proxyPort == PfPorts::Https);
+    QByteArray first;
+    if (!readFirstFlight(*sh, clientFd, tls, first))
+        return;
+
     Fd upstream(connectTo(dst, kConnectTimeoutMs));
     if (upstream.fd < 0) {
         LOG_DEBUG("Connect to %1 failed (%2)", ipString(dst), QString::fromLocal8Bit(strerror(errno)));
         return;
     }
-
-    const bool tls = (proxyPort == PfPorts::Https);
-    QByteArray first;
-    if (!readFirstFlight(*sh, clientFd, tls, first))
-        return;
     ++sh->conns;
     if (!sendFirstFlight(sh->cfg, tls, first, upstream.fd))
         return;
@@ -829,7 +834,8 @@ bool PfBackend::start(const BypassConfig& config)
     worker->moveToThread(thread);
 
     connect(thread, &QThread::started,         worker, &PfWorker::run);
-    connect(worker, &PfWorker::finished,       thread, &QThread::quit);
+    // Direct: stop() blocks the main thread in wait(), so a queued quit() would never run.
+    connect(worker, &PfWorker::finished,       thread, &QThread::quit, Qt::DirectConnection);
     connect(worker, &PfWorker::finished,       worker, &QObject::deleteLater);
     connect(thread, &QThread::finished,        thread, &QObject::deleteLater);
     connect(worker, &PfWorker::errorOccurred,  this,   &PfBackend::errorOccurred);
