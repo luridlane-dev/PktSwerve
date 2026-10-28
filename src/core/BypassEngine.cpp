@@ -313,9 +313,11 @@ void BypassEngine::saveConfig()
 bool BypassEngine::autoStart() const
 {
 #ifdef PLATFORM_WINDOWS
-    QString cmd = "schtasks /Query /TN \"PktSwerve\" >nul 2>&1";
-    int ret = system(cmd.toStdString().c_str());
-    return (ret == 0);
+    if (m_autoStartCache < 0) {
+        const int ret = system("schtasks /Query /TN \"PktSwerve\" >nul 2>&1");
+        m_autoStartCache = (ret == 0);
+    }
+    return m_autoStartCache;
 #elif defined(PLATFORM_MACOS)
     return QFile::exists(launchAgentPath());
 #else
@@ -327,6 +329,7 @@ void BypassEngine::setAutoStart(bool enabled)
 {
     LOG_INFO("setAutoStart: %1", enabled ? "enabled" : "disabled");
     setupAutoStart(enabled);
+    m_autoStartCache = -1;   // the task may not have been created; ask again next time
 }
 
 void BypassEngine::setupAutoStart(bool enabled)

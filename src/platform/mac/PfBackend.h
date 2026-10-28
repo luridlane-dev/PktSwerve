@@ -4,6 +4,7 @@
 #include "platform/IPlatformBackend.h"
 #include <QThread>
 #include <QPointer>
+#include <QThreadPool>
 #include <atomic>
 #include <memory>
 
@@ -45,6 +46,7 @@ private:
     std::shared_ptr<PfShared> m_state;     // lets stop() reach the worker
     QString                   m_lastError;
     QString                   m_pfToken;   // reference token from `pfctl -E`
+    bool                      m_pfActive = false;   // rules may be loaded; clearPf() has work to do
     QString                   m_anchor;    // per-process pf anchor
     qint64                    m_watchdogPid = 0;
     std::atomic<bool>         m_running{false};
@@ -84,6 +86,7 @@ private:
     std::shared_ptr<PfShared> m_shared;
     int m_httpFd  = -1;
     int m_httpsFd = -1;
+    QThreadPool m_dnsPool;
 
     void closeListeners();
 };

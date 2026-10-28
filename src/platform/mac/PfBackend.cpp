@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
+#include <libproc.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -16,8 +17,10 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QThreadPool>
 
 #include <algorithm>
 #include <atomic>
@@ -65,7 +68,10 @@ constexpr int kMaxConnections   = 1000;   // one thread and two fds each
 constexpr int kConnectTimeoutMs = 10000;
 constexpr int kFirstFlightTimeoutMs = 60000;
 constexpr int kRelayBufferSize  = 16384;
+constexpr int kTlsRecordHeader  = 5;
+constexpr int kDnsQuerySize     = 4096;
 constexpr int kDnsReplySize     = 8192;
+constexpr int kDnsThreads       = 16;
 
 // net/pfvar.h is not in the public SDK; this mirrors xnu's struct pfioc_natlook.
 struct PfAddr {
@@ -225,6 +231,16 @@ bool sendChunks(int fd, const QByteArray& data, QList<int> cuts)
         start = cut;
     }
     return sendAll(fd, data.constData() + start, static_cast<size_t>(data.size() - start));
+}
+
+// kill(pid, 0) alone is fooled by a recycled pid, so the name is checked too.
+bool isPktSwerveRunning(pid_t pid)
+{
+    char path[PROC_PIDPATHINFO_MAXSIZE];
+    if (::proc_pidpath(pid, path, sizeof(path)) <= 0)
+        return false;
+    return QFileInfo(QString::fromLocal8Bit(path)).fileName() ==
+           QFileInfo(QCoreApplication::applicationFilePath()).fileName();
 }
 
 bool wouldBlock(int err) { return err == EAGAIN || err == EWOULDBLOCK || err == EINTR; }
@@ -446,7 +462,12 @@ bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int ups
                 if (cfg.tlsRecordSplit && findSniHost(p, n, off, len)) {
                     // Cut in the middle of the host name so neither record holds all of it.
                     const int boundary = splitTlsRecord(data, off + std::max<uint32_t>(1, len / 2));
-                    if (boundary > 0) cuts << boundary;
+                    if (boundary > 0) {
+                        // The second record header adds bytes after the boundary.
+                        for (int& cut : cuts)
+                            if (cut > boundary) cut += kTlsRecordHeader;
+                        cuts << boundary;
+                    }
                 }
             }
         }
@@ -601,18 +622,23 @@ void acceptConnections(const std::shared_ptr<PfShared>& sh, int listenFd, int pr
     }
 }
 
-void receiveDnsQueries(const std::shared_ptr<PfShared>& sh)
+// Reuses pool threads instead of starting one per query.
+void receiveDnsQueries(const std::shared_ptr<PfShared>& sh, QThreadPool& pool)
 {
-    QByteArray buf(65535, '\0');
+    char buf[kDnsQuerySize];
     for (;;) {
         sockaddr_in client{};
         socklen_t cl = sizeof(client);
-        const ssize_t n = ::recvfrom(sh->dnsFd, buf.data(), static_cast<size_t>(buf.size()), 0,
+        const ssize_t n = ::recvfrom(sh->dnsFd, buf, sizeof(buf), 0,
                                      reinterpret_cast<sockaddr*>(&client), &cl);
         if (n < 0) return;   // EWOULDBLOCK: drained
         if (n < 12 || sh->active >= kMaxConnections) continue;
-        const QByteArray query(buf.constData(), static_cast<int>(n));
-        spawn(sh, [query, client](const std::shared_ptr<PfShared>& s) { handleDns(s, query, client); });
+
+        ++sh->active;
+        pool.start([sh, query = QByteArray(buf, static_cast<int>(n)), client] {
+            handleDns(sh, query, client);
+            --sh->active;
+        });
     }
 }
 
@@ -724,7 +750,7 @@ void PfBackend::clearStaleAnchors()
         const QRegularExpressionMatch m = re.match(line.trimmed());
         if (!m.hasMatch()) continue;
         const qint64 pid = m.captured(2).toLongLong();      // 0 for the old fixed name
-        if (pid == getpid() || (pid > 0 && ::kill(static_cast<pid_t>(pid), 0) == 0))
+        if (pid == getpid() || (pid > 0 && isPktSwerveRunning(static_cast<pid_t>(pid))))
             continue;                                       // ours, or still alive
         const QString anchor = kAnchorParent + "/" + m.captured(1);
         LOG_INFO("Removing stale pf anchor %1", anchor);
@@ -773,7 +799,8 @@ bool PfBackend::setupPf(const BypassConfig& config)
     if (!enable.ok)
         return fail("Could not enable pf: " + enable.output);
     const QRegularExpressionMatch m = QRegularExpression("Token\\s*:\\s*(\\d+)").match(enable.output);
-    m_pfToken = m.hasMatch() ? m.captured(1) : QString();
+    m_pfToken  = m.hasMatch() ? m.captured(1) : QString();
+    m_pfActive = true;
 
     const PfctlResult load = runPfctl({"-a", m_anchor, "-f", "-"}, buildRules(config));
     if (!load.ok) {
@@ -787,6 +814,10 @@ bool PfBackend::setupPf(const BypassConfig& config)
 
 bool PfBackend::clearPf()
 {
+    if (!m_pfActive)
+        return true;   // stop() already did it; the finished handler arrives later
+    m_pfActive = false;
+
     stopWatchdog();
     runPfctl({"-a", m_anchor, "-F", "rules"});
     runPfctl({"-a", m_anchor, "-F", "nat"});
@@ -873,7 +904,10 @@ bool PfBackend::stop()
 bool    PfBackend::isRunning() const { return m_running; }
 QString PfBackend::lastError() const { return m_lastError; }
 
-PfWorker::PfWorker(QObject* parent) : QObject(parent), m_shared(std::make_shared<PfShared>()) {}
+PfWorker::PfWorker(QObject* parent) : QObject(parent), m_shared(std::make_shared<PfShared>())
+{
+    m_dnsPool.setMaxThreadCount(kDnsThreads);
+}
 
 PfWorker::~PfWorker() { closeListeners(); }
 
@@ -952,7 +986,7 @@ void PfWorker::run()
 
         if (iHttp  < n && (fds[iHttp].revents  & POLLIN)) acceptConnections(sh, m_httpFd,  PfPorts::Http);
         if (iHttps < n && (fds[iHttps].revents & POLLIN)) acceptConnections(sh, m_httpsFd, PfPorts::Https);
-        if (iDns   < n && (fds[iDns].revents   & POLLIN)) receiveDnsQueries(sh);
+        if (iDns   < n && (fds[iDns].revents   & POLLIN)) receiveDnsQueries(sh, m_dnsPool);
 
         const quint64 conns = sh->conns, bytes = sh->bytes;
         if (conns != lastConns || bytes != lastBytes) {

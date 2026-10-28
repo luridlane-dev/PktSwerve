@@ -40,6 +40,7 @@ private:
     IPlatformBackend* m_backend  = nullptr;
     BypassConfig      m_config;
     QString           m_lastError;
+    mutable int       m_autoStartCache = -1;   // -1: not queried yet
 
     IPlatformBackend* createBackend();
     void              setupAutoStart(bool enabled);
