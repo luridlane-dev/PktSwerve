@@ -4,9 +4,74 @@
 #include "app/Logger.h"
 #include <shellapi.h>
 #include <QHostAddress>
+#include <algorithm>
 #include <vector>
 #include <cstdlib>
 #include <QRandomGenerator>
+
+namespace {
+
+constexpr quint64 kTlsFlowTimeoutMs = 3000;
+constexpr int     kMaxHopEntries    = 4096;
+constexpr int     kVoiceDecoyCount  = 6;
+constexpr int     kVoiceDecoySize   = 64;
+constexpr int     kVoiceProbeSize   = 74;
+constexpr uint16_t kVoiceMinPort    = 50000;
+
+// A ClientHello held back until its whole record has arrived.
+struct HeldFlow {
+    TlsFlowBuffer     buffer;
+    WINDIVERT_ADDRESS addr{};
+};
+
+QByteArray addrKey(const void* addr, int size)
+{
+    return QByteArray(reinterpret_cast<const char*>(addr), size);
+}
+
+bool isVoiceProbe(const WINDIVERT_UDPHDR* udp, const uint8_t* payload, uint32_t len)
+{
+    return ntohs(udp->DstPort) >= kVoiceMinPort && len == kVoiceProbeSize &&
+           payload[0] == 0x00 && payload[1] == 0x01 && payload[2] == 0x00 && payload[3] == 0x46;
+}
+
+// Minimal ClientHello that only carries a server name; enough for a DPI to parse.
+QByteArray buildFakeClientHello(const QByteArray& host)
+{
+    auto be16 = [](QByteArray& b, int v) { b.append(char(v >> 8)).append(char(v)); };
+
+    QByteArray name;
+    be16(name, host.size() + 3);
+    name.append('\0');
+    be16(name, host.size());
+    name.append(host);
+
+    QByteArray ext;
+    be16(ext, 0);
+    be16(ext, name.size());
+    ext.append(name);
+
+    QByteArray hello;
+    hello.append("\x03\x03", 2);
+    for (int i = 0; i < 32; ++i)
+        hello.append(char(QRandomGenerator::global()->bounded(256)));
+    hello.append('\0');
+    hello.append("\x00\x02\x13\x01", 4);
+    hello.append("\x01\x00", 2);
+    be16(hello, ext.size());
+    hello.append(ext);
+
+    QByteArray handshake;
+    handshake.append('\x01').append(char(hello.size() >> 16));
+    be16(handshake, hello.size() & 0xFFFF);
+    handshake.append(hello);
+
+    QByteArray record("\x16\x03\x01", 3);
+    be16(record, handshake.size());
+    return record + handshake;
+}
+
+} // namespace
 
 
 WinDivertBackend::WinDivertBackend(QObject* parent) : IPlatformBackend(parent)
@@ -141,6 +206,8 @@ QString WinDivertBackend::lastError() const { return m_lastError; }
 WinDivertWorker::WinDivertWorker(QObject* parent) : QObject(parent) {
     m_fragBuf1.resize(MAX_PACKET_SIZE);
     m_fragBuf2.resize(MAX_PACKET_SIZE);
+    m_fakeTlsHello = buildFakeClientHello("www.google.com");
+    m_fakeHttp     = "GET / HTTP/1.1\r\nHost: www.google.com\r\n\r\n";
 }
 
 WinDivertWorker::~WinDivertWorker()
@@ -216,6 +283,23 @@ void WinDivertWorker::run()
                            .arg(tcpConditions);
     }
 
+    // SYN-ACKs tell how far each server is, so decoys can be given a TTL that
+    // expires before it.
+    const bool usesDecoys = m_config.fakePackets || m_config.wrongChecksum || m_config.wrongSeq;
+    if (usesDecoys && !tcpPorts.isEmpty()) {
+        QStringList ports;
+        if (m_config.fragmentHttpRequests) ports << "tcp.SrcPort == 80";
+        if (m_config.fragmentHttpsPersist) ports << "tcp.SrcPort == 443";
+        filters << QString("(inbound and tcp.Syn and tcp.Ack and (%1))").arg(ports.join(" or "));
+    }
+
+    if (m_config.fakeVoiceUdp) {
+        filters << QString("(outbound and udp and udp.DstPort >= %1 and udp.PayloadLength == %2 "
+                           "and udp.Payload[0] == 0x00 and udp.Payload[1] == 0x01 "
+                           "and udp.Payload[2] == 0x00 and udp.Payload[3] == 0x46)")
+                           .arg(kVoiceMinPort).arg(kVoiceProbeSize);
+    }
+
     // QUIC encrypts the hostname before this layer can reliably inspect it.
     // In selected-sites mode, dropping every UDP/443 packet is a global
     // intervention and makes unrelated applications fall back or fail.
@@ -269,7 +353,8 @@ void WinDivertWorker::run()
     quint64  byteCount   = 0;
     quint64  bypassCount = 0;
     quint64  dnsCount    = 0;
-    QMap<quint64, TlsFlowBuffer> tlsFlows;
+    QMap<quint64, HeldFlow> tlsFlows;
+    quint64 lastFlowSweep = 0;
 
     auto reinjectTlsFlow = [this, &bypassCount](TlsFlowBuffer& flow, bool bypass,
                                                 WINDIVERT_ADDRESS* address) {
@@ -306,6 +391,19 @@ void WinDivertWorker::run()
 
             WinDivertHelperCalcChecksums(rawData, rawLength, address, 0);
             WinDivertSend(m_handle, rawData, rawLength, nullptr, address);
+        }
+    };
+
+    // Flows whose ClientHello never completed are let through as they were.
+    auto sweepTlsFlows = [&](quint64 now) {
+        for (auto it = tlsFlows.begin(); it != tlsFlows.end();) {
+            if (now - it->buffer.lastUpdate <= kTlsFlowTimeoutMs) {
+                ++it;
+                continue;
+            }
+            LOG_DEBUG("TLS ClientHello never completed | flow=%1 - releasing held packets", it.key());
+            reinjectTlsFlow(it->buffer, false, &it->addr);
+            it = tlsFlows.erase(it);
         }
     };
 
@@ -352,6 +450,12 @@ void WinDivertWorker::run()
             modified = true;
             LOG_DEBUG0("QUIC (UDP/443) dropped - browser will fall back to TCP");
 
+        } else if (udp && m_config.fakeVoiceUdp && addr.Outbound && payload &&
+                   isVoiceProbe(udp, payload, pLen)) {
+            LOG_DEBUG0("Voice probe - sending decoys");
+            sendVoiceDecoys(m_handle, packet, &addr, ip4, ip6);
+            ++bypassCount;
+
         } else if (tcp && payload && pLen > 0) {
             uint16_t dstPort = ntohs(tcp->DstPort);
 
@@ -389,7 +493,10 @@ void WinDivertWorker::run()
                                                   m_config.reverseFrag);
                     }
                 } else {
-                    TlsFlowBuffer& flow = tlsFlows[tlsFlowId];
+                    HeldFlow& held = tlsFlows[tlsFlowId];
+                    TlsFlowBuffer& flow = held.buffer;
+                    if (flow.rawPackets.isEmpty())
+                        held.addr = addr;
                     flow.lastUpdate = GetTickCount64();
                     flow.rawPackets.append(QByteArray(reinterpret_cast<const char*>(packet),
                                                        static_cast<int>(packetLen)));
@@ -436,9 +543,9 @@ void WinDivertWorker::run()
                 }
             }
 
-            // -------------------------------------------------------------------
-            // UDP - DNS redirect (IPv4 + IPv6)
-            // -------------------------------------------------------------------
+        } else if (tcp && !addr.Outbound && tcp->Syn && tcp->Ack && (ip4 || ip6)) {
+            learnHops(ip4, ip6);
+
         } else if (udp && m_config.dnsRedirect) {
 
             if (addr.Outbound) {
@@ -505,6 +612,14 @@ void WinDivertWorker::run()
         }
         if (pktCount % 50 == 0)
             emit statsUpdated(pktCount, byteCount);
+
+        if (!tlsFlows.isEmpty()) {
+            const quint64 now = GetTickCount64();
+            if (now - lastFlowSweep > 500) {
+                lastFlowSweep = now;
+                sweepTlsFlows(now);
+            }
+        }
 
         if (pktCount % 10000 == 0) {
             const quint64 now = GetTickCount64();
@@ -587,25 +702,23 @@ void WinDivertWorker::sendFakePacket(
     uint32_t ipHdrLen  = ip4 ? (ip4->HdrLength * 4u) : 40u;
     uint32_t tcpHdrLen = tcp->HdrLength * 4u;
     uint32_t headerLen = ipHdrLen + tcpHdrLen;
-    constexpr uint32_t FAKE_SZ = 16;
-    uint32_t fakeLen = headerLen + FAKE_SZ;
+    const QByteArray& fake = fakePayload(tcp);
+    const uint32_t fakeLen = headerLen + static_cast<uint32_t>(fake.size());
 
     if (fakeLen > MAX_PACKET_SIZE) return;
 
     std::vector<uint8_t> localBuf(fakeLen);
     memcpy(localBuf.data(), packet, headerLen);
-
-    for (uint32_t i = 0; i < FAKE_SZ; ++i)
-        localBuf[headerLen + i] = static_cast<uint8_t>(rand() % 256);
+    memcpy(localBuf.data() + headerLen, fake.constData(), fake.size());
 
     if (ip4) {
         auto* h4   = reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data());
         h4->Length = htons(static_cast<uint16_t>(fakeLen));
-        h4->TTL    = static_cast<uint8_t>(m_config.fakePacketTTL);
+        h4->TTL    = fakeTtl(ip4, ip6);
     } else if (ip6) {
         auto* h6     = reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data());
         h6->Length   = htons(static_cast<uint16_t>(fakeLen - 40));
-        h6->HopLimit = static_cast<uint8_t>(m_config.fakePacketTTL);
+        h6->HopLimit = fakeTtl(ip4, ip6);
     }
 
     WinDivertHelperCalcChecksums(localBuf.data(), fakeLen, addr, 0);
@@ -627,10 +740,10 @@ void WinDivertWorker::sendWrongChecksumPacket(
 
     if (ip4)
         reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL =
-            static_cast<uint8_t>(m_config.fakePacketTTL);
+            fakeTtl(ip4, ip6);
     else if (ip6)
         reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit =
-            static_cast<uint8_t>(m_config.fakePacketTTL);
+            fakeTtl(ip4, ip6);
 
     WinDivertSend(h, localBuf.data(), packetLen, nullptr, addr);
 }
@@ -651,15 +764,69 @@ void WinDivertWorker::sendWrongSeqPacket(
 
     if (ip4)
         reinterpret_cast<WINDIVERT_IPHDR*>(localBuf.data())->TTL =
-            static_cast<uint8_t>(m_config.fakePacketTTL);
+            fakeTtl(ip4, ip6);
     else if (ip6)
         reinterpret_cast<WINDIVERT_IPV6HDR*>(localBuf.data())->HopLimit =
-            static_cast<uint8_t>(m_config.fakePacketTTL);
+            fakeTtl(ip4, ip6);
 
     WinDivertHelperCalcChecksums(localBuf.data(), packetLen, addr, 0);
     WinDivertSend(h, localBuf.data(), packetLen, nullptr, addr);
 }
 
+
+void WinDivertWorker::learnHops(const WINDIVERT_IPHDR* ip4, const WINDIVERT_IPV6HDR* ip6)
+{
+    const int seen    = ip4 ? ip4->TTL : ip6->HopLimit;
+    const int initial = seen <= 64 ? 64 : (seen <= 128 ? 128 : 255);
+
+    if (m_hops.size() >= kMaxHopEntries)
+        m_hops.clear();
+    const QByteArray server = ip4 ? addrKey(&ip4->SrcAddr, 4) : addrKey(ip6->SrcAddr, 16);
+    m_hops.insert(server, static_cast<uint8_t>(initial - seen));
+}
+
+uint8_t WinDivertWorker::fakeTtl(const WINDIVERT_IPHDR* ip4, const WINDIVERT_IPV6HDR* ip6) const
+{
+    int ttl = m_config.fakePacketTTL;
+    const QByteArray server = ip4 ? addrKey(&ip4->DstAddr, 4) : addrKey(ip6->DstAddr, 16);
+    const auto it = m_hops.constFind(server);
+    if (it != m_hops.constEnd() && it.value() > 1)
+        ttl = std::min(ttl, it.value() - 1);
+    return static_cast<uint8_t>(std::max(ttl, 1));
+}
+
+const QByteArray& WinDivertWorker::fakePayload(const WINDIVERT_TCPHDR* tcp) const
+{
+    return ntohs(tcp->DstPort) == 80 ? m_fakeHttp : m_fakeTlsHello;
+}
+
+void WinDivertWorker::sendVoiceDecoys(
+    HANDLE h, uint8_t* packet, WINDIVERT_ADDRESS* addr,
+    WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6)
+{
+    const uint32_t ipHdrLen = ip4 ? (ip4->HdrLength * 4u) : 40u;
+    const uint32_t headerLen = ipHdrLen + sizeof(WINDIVERT_UDPHDR);
+    const uint32_t decoyLen  = headerLen + kVoiceDecoySize;
+
+    std::vector<uint8_t> decoy(decoyLen, 0);
+    memcpy(decoy.data(), packet, headerLen);
+
+    const uint16_t udpLen = htons(static_cast<uint16_t>(sizeof(WINDIVERT_UDPHDR) + kVoiceDecoySize));
+    reinterpret_cast<WINDIVERT_UDPHDR*>(decoy.data() + ipHdrLen)->Length = udpLen;
+    if (ip4) {
+        auto* h4   = reinterpret_cast<WINDIVERT_IPHDR*>(decoy.data());
+        h4->Length = htons(static_cast<uint16_t>(decoyLen));
+        h4->TTL    = static_cast<uint8_t>(m_config.fakePacketTTL);
+    } else {
+        auto* h6     = reinterpret_cast<WINDIVERT_IPV6HDR*>(decoy.data());
+        h6->Length   = udpLen;
+        h6->HopLimit = static_cast<uint8_t>(m_config.fakePacketTTL);
+    }
+    WinDivertHelperCalcChecksums(decoy.data(), decoyLen, addr, 0);
+
+    for (int i = 0; i < kVoiceDecoyCount; ++i)
+        WinDivertSend(h, decoy.data(), decoyLen, nullptr, addr);
+}
 
 bool WinDivertWorker::redirectDnsOutbound(
     HANDLE h, uint8_t* packet, uint32_t packetLen, WINDIVERT_ADDRESS* addr,

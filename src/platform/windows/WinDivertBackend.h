@@ -19,6 +19,8 @@
 #undef __inout_opt
 
 #include <atomic>
+#include <QByteArray>
+#include <QHash>
 #include <QThread>
 #include <QMap>
 #include "platform/IPlatformBackend.h"
@@ -107,6 +109,18 @@ private:
         WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6, WINDIVERT_UDPHDR* udp,
         const DnsState& st);
 
+    // Decoys that expire in transit must die before the server but after the DPI.
+    // The server's distance is read from its SYN-ACK and caps the configured TTL.
+    void    learnHops(const WINDIVERT_IPHDR* ip4, const WINDIVERT_IPV6HDR* ip6);
+    uint8_t fakeTtl(const WINDIVERT_IPHDR* ip4, const WINDIVERT_IPV6HDR* ip6) const;
+    const QByteArray& fakePayload(const WINDIVERT_TCPHDR* tcp) const;
+
+    // Voice calls start with one 74-byte "IP discovery" datagram.
+    // A few zero-filled decoys ahead of it keep the DPI from classifying the flow.
+    void sendVoiceDecoys(
+        HANDLE h, uint8_t* packet, WINDIVERT_ADDRESS* addr,
+        WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6);
+
     BypassConfig        m_config;
     std::atomic<bool>   m_stopRequested { false };
     std::atomic<HANDLE> m_handle        { nullptr };
@@ -116,6 +130,10 @@ private:
     // indexing by source port alone can rewrite a reply with another query's
     // original destination.
     QMap<quint64, DnsState> m_dnsState;
+
+    QHash<QByteArray, uint8_t> m_hops;   // server address -> hops seen in its SYN-ACK
+    QByteArray m_fakeTlsHello;
+    QByteArray m_fakeHttp;
 
     static constexpr uint32_t MAX_PACKET_SIZE = 65535;
 

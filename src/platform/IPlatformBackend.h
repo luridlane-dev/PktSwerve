@@ -23,6 +23,7 @@ struct BypassConfig {
     bool wrongChecksum        = false;
     bool wrongSeq              = false;
     bool fakePackets           = true;
+    bool fakeVoiceUdp          = true;  // Windows: decoys before voice discovery packets
 
     int httpFragmentSize  = 2;
     int httpsFragmentSize = 2;

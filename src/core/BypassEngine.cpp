@@ -237,6 +237,7 @@ void BypassEngine::loadConfig()
     m_config.reverseFrag          = obj["reverseFrag"].toBool(false);
     m_config.tlsRecordSplit       = obj["tlsRecordSplit"].toBool(false);
     m_config.fakePackets         = obj["fakePackets"].toBool(true);
+    m_config.fakeVoiceUdp         = obj["fakeVoiceUdp"].toBool(true);
     m_config.httpFragmentSize     = obj["httpFragmentSize"].toInt(2);
     m_config.httpsFragmentSize    = obj["httpsFragmentSize"].toInt(2);
     m_config.fakePacketTTL        = obj["fakePacketTTL"].toInt(8);
@@ -276,6 +277,7 @@ void BypassEngine::saveConfig()
     obj["reverseFrag"]           = m_config.reverseFrag;
     obj["tlsRecordSplit"]        = m_config.tlsRecordSplit;
     obj["fakePackets"]          = m_config.fakePackets;
+    obj["fakeVoiceUdp"]          = m_config.fakeVoiceUdp;
     obj["httpFragmentSize"]      = m_config.httpFragmentSize;
     obj["httpsFragmentSize"]     = m_config.httpsFragmentSize;
     obj["fakePacketTTL"]         = m_config.fakePacketTTL;

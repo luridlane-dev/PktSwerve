@@ -50,6 +50,7 @@ private:
     QCheckBox*    m_reverseFrag = nullptr;
     QCheckBox*    m_tlsRecSplit = nullptr; // macOS only
     QCheckBox*    m_fakePackets = nullptr;
+    QCheckBox*    m_voiceUdp = nullptr;
     QSpinBox*     m_httpFragSize = nullptr;
     QSpinBox*     m_httpsFragSize = nullptr;
     QSpinBox*     m_fakeTTL = nullptr;

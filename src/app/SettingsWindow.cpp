@@ -316,20 +316,25 @@ void SettingsWindow::buildMethodsTab(QWidget* tab)
         "Disrupts DPI TCP stream reassembly. Aggressive; try disabling if other methods "
         "cause issues.");
 
+    m_voiceUdp = addSwitch(fakeGroup, "Voice call decoys (UDP)",
+        "Sends a few decoy datagrams before the 74-byte discovery packet that starts a "
+        "voice call, so the call connects. Applies to every app that makes such a call.");
+
     m_fakeTTL = makeSpin(1, 128);
     m_fakeTTL->setValue(8);
     auto* ttl = new QFormLayout;
     ttl->addRow("Fake packet TTL:", m_fakeTTL);
     addForm(fakeGroup, ttl);
     fakeGroup->layout()->addWidget(makeLabel(
-        "Fake packet lifetime in hops. Too high and the packet may reach the destination.", "note"));
+        "Highest fake packet lifetime in hops. It is lowered per server once the distance is known; "
+        "too high and the packet may reach the destination.", "note"));
     lay->addWidget(fakeGroup);
     lay->addStretch();
 
 #ifdef PLATFORM_MACOS
     // The proxy backend cannot reorder segments or craft invalid packets.
     const QString unsupported = "Not available on macOS (proxy-based backend).";
-    for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum, m_wrongSeq, m_fakeTTL}) {
+    for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum, m_wrongSeq, m_voiceUdp, m_fakeTTL}) {
         w->setEnabled(false);
         w->setToolTip(unsupported);
     }
@@ -446,6 +451,7 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_httpFragSize->setValue(cfg.httpFragmentSize);
     m_httpsFragSize->setValue(cfg.httpsFragmentSize);
     m_fakePackets->setChecked(cfg.fakePackets);
+    m_voiceUdp->setChecked(cfg.fakeVoiceUdp);
     m_wrongChecksum->setChecked(cfg.wrongChecksum);
     m_wrongSeq->setChecked(cfg.wrongSeq);
     m_fakeTTL->setValue(cfg.fakePacketTTL);
@@ -470,6 +476,7 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.httpFragmentSize     = m_httpFragSize->value();
     cfg.httpsFragmentSize    = m_httpsFragSize->value();
     cfg.fakePackets          = m_fakePackets->isChecked();
+    cfg.fakeVoiceUdp         = m_voiceUdp->isChecked();
     cfg.wrongChecksum        = m_wrongChecksum->isChecked();
     cfg.wrongSeq             = m_wrongSeq->isChecked();
     cfg.fakePacketTTL        = m_fakeTTL->value();
