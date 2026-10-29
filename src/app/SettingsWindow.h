@@ -4,6 +4,7 @@
 class BypassEngine;
 struct BypassConfig;
 
+class DomainListEditor;
 class QCheckBox;
 class QComboBox;
 class QLineEdit;
@@ -62,6 +63,6 @@ private:
     QTextEdit*    m_dnsStatusLabel = nullptr;
     QPushButton*  m_checkBtn = nullptr;
 
-    QTextEdit*    m_blacklistEdit = nullptr;
+    DomainListEditor* m_blacklist = nullptr;
     QWidget*      m_hostListWidget = nullptr;
 };

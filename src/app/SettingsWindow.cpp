@@ -1,4 +1,5 @@
 #include "SettingsWindow.h"
+#include "app/DomainListEditor.h"
 #include "app/Logger.h"
 #include "app/Theme.h"
 #include "app/ToggleSwitch.h"
@@ -110,17 +111,6 @@ QVBoxLayout* makePageLayout(QWidget* page, int margin = 4)
     lay->setContentsMargins(margin, 8, margin, margin);
     lay->setSpacing(16);
     return lay;
-}
-
-QStringList splitLines(const QTextEdit* edit)
-{
-    QStringList result;
-    for (const QString& line : edit->toPlainText().split('\n')) {
-        const QString trimmed = line.trimmed().toLower();
-        if (!trimmed.isEmpty())
-            result << trimmed;
-    }
-    return result;
 }
 
 void flushDnsCache()
@@ -397,13 +387,12 @@ void SettingsWindow::buildHostlistTab(QWidget* tab)
     QVBoxLayout* lay = makePageLayout(tab);
 
     lay->addWidget(makeLabel(
-        "One domain per line. Subdomains match automatically "
+        "Type a domain and press Enter. Subdomains match automatically "
         "(e.g. 'example.com' also covers 'api.example.com').", "note"));
     lay->addWidget(makeLabel("Bypass List", "heading"));
 
-    m_blacklistEdit = new QTextEdit;
-    m_blacklistEdit->setPlaceholderText("discord.com\ntwitter.com\nreddit.com");
-    lay->addWidget(m_blacklistEdit);
+    m_blacklist = new DomainListEditor;
+    lay->addWidget(m_blacklist, 1);
 }
 
 
@@ -461,7 +450,7 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_dnsPort->setValue(cfg.dnsPort);
     m_dnsPresetCombo->setCurrentIndex(0);
 
-    m_blacklistEdit->setPlainText(cfg.blacklist.join("\n"));
+    m_blacklist->setDomains(cfg.blacklist);
 }
 
 BypassConfig SettingsWindow::uiToConfig()
@@ -485,7 +474,7 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.dnsServer   = m_dnsServer->text().trimmed();
     cfg.dnsPort     = m_dnsPort->value();
 
-    cfg.blacklist = splitLines(m_blacklistEdit);
+    cfg.blacklist = m_blacklist->domains();
     return cfg;
 }
 

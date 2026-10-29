@@ -31,6 +31,8 @@ set(PROJECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Logger.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/DomainListEditor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/DomainListEditor.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/ToggleSwitch.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/ToggleSwitch.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.cpp

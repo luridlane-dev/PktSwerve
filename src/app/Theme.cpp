@@ -111,6 +111,18 @@ const char* kAppStyle = R"(
 
     QPushButton#destructiveBtn { color: @red; }
 
+    QFrame#chip { background: @fill; border-radius: 14px; }
+    QFrame#chip QLabel { background: transparent; }
+    QPushButton#chipRemove {
+        background: @fillHigh;
+        color: @subtext;
+        border-radius: 10px;
+        padding: 0;
+        min-width: 20px; max-width: 20px;
+        min-height: 20px; max-height: 20px;
+    }
+    QPushButton#chipRemove:hover { background: @red; color: @text; }
+
     QScrollArea { border: none; }
     QScrollBar:vertical { background: transparent; width: 10px; margin: 2px; }
     QScrollBar::handle:vertical { background: @hint; border-radius: 3px; min-height: 28px; }
