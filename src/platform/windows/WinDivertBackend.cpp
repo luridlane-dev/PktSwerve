@@ -574,6 +574,13 @@ void WinDivertWorker::run()
                 bool    bypass      = dnsRedirectApplies(queryDomain, m_config);
                 quint16 transactionId = 0;
 
+                if (bypass && ip6 && QHostAddress(m_config.dnsServer).protocol() != QAbstractSocket::IPv6Protocol) {
+                    // An IPv4 resolver cannot take this query. Letting it through would reach the
+                    // ISP resolver unchanged, so drop it and let Windows retry over IPv4.
+                    LOG_DEBUG("DNS outbound | domain=%1 | dropping IPv6 query, resolver is IPv4", queryDomain);
+                    goto next_packet;
+                }
+
                 if (bypass && extractDnsTransactionId(payload, pLen, transactionId) && (ip4 || ip6)) {
                     quint16 clientPort = ntohs(udp->SrcPort);
 
