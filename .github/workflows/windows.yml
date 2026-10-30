@@ -8,7 +8,11 @@ on:
     paths-ignore: ['**.md']
 
 permissions:
-  contents: read
+  contents: write   # publishes the rolling windows-latest release
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -16,9 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Qt 6.11 moved its Windows packages to a new repository layout that the released
-      # aqtinstall (3.3.0) cannot read; the fix is merged on main. Drop `aqtsource` once
-      # aqtinstall 3.4 is out.
+      # aqtinstall 3.3.0 cannot read the Qt 6.11 Windows repository layout; the fix is on
+      # its main branch. Remove aqtsource after aqtinstall 3.4 is released.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
@@ -54,10 +57,22 @@ jobs:
           New-Item -ItemType Directory dist/PktSwerve | Out-Null
           Copy-Item build/PktSwerve.exe dist/PktSwerve/
           Copy-Item vendor/windivert/WinDivert.dll, vendor/windivert/WinDivert64.sys dist/PktSwerve/
-          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler dist/PktSwerve/PktSwerve.exe
+          windeployqt --release --translations tr --no-opengl-sw --no-system-d3d-compiler dist/PktSwerve/PktSwerve.exe
           Compress-Archive -Path dist/PktSwerve -DestinationPath PktSwerve-win64.zip
 
       - uses: actions/upload-artifact@v4
         with:
           name: PktSwerve-Windows
           path: PktSwerve-win64.zip
+
+      - name: Publish rolling release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete windows-latest --cleanup-tag --yes || true
+          gh release create windows-latest PktSwerve-win64.zip \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "PktSwerve Windows (latest build)" \
+            --notes "Download PktSwerve-win64.zip and extract the whole folder. Built from $GITHUB_SHA."
