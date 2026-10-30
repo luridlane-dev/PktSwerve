@@ -36,6 +36,7 @@ struct PfShared {
     std::atomic<int>     active{0};
     std::atomic<quint64> conns{0};
     std::atomic<quint64> bytes{0};
+    std::atomic<qint64>  dnsRedirectSkipUntilMs{0};   // while in the future, the redirect server is skipped
     int pfFd      = -1;       // /dev/pf, for DIOCNATLOOK
     int dnsFd     = -1;       // UDP listener; replies must leave from it
     int wakeFd[2] = {-1, -1}; // self-pipe that wakes poll() on stop
@@ -72,6 +73,15 @@ constexpr int kTlsRecordHeader  = 5;
 constexpr int kDnsQuerySize     = 4096;
 constexpr int kDnsReplySize     = 8192;
 constexpr int kDnsThreads       = 16;
+constexpr int kDnsRedirectTimeoutMs = 1500;   // after this, ask the resolver the client originally chose
+constexpr int kDnsOriginalTimeoutMs = 3000;
+constexpr int kDnsRedirectBackoffMs = 30000;  // how long a silent redirect server is skipped
+
+qint64 nowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // net/pfvar.h is not in the public SDK; this mirrors xnu's struct pfioc_natlook.
 struct PfAddr {
@@ -524,6 +534,42 @@ void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
     relay(*sh, clientFd, upstream.fd);
 }
 
+// Sends the query to `target` and relays the first reply back to `client`.
+// Returns false if no reply arrives within `timeoutMs`.
+bool forwardDns(PfShared& sh, const QByteArray& query, const sockaddr_in& target,
+                const sockaddr_in& client, int timeoutMs)
+{
+    Fd s(::socket(AF_INET, SOCK_DGRAM, 0));
+    if (s.fd < 0) return false;
+    setNoSigPipe(s.fd);
+    setCloexec(s.fd);
+    // connect() makes the kernel drop datagrams from anywhere but the resolver.
+    if (::connect(s.fd, reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0 ||
+        ::send(s.fd, query.constData(), query.size(), 0) < 0)
+        return false;
+
+    pollfd p{s.fd, POLLIN, 0};
+    int r;
+    do { r = ::poll(&p, 1, timeoutMs); } while (r < 0 && errno == EINTR);
+    if (r <= 0) return false;
+
+    char reply[kDnsReplySize];
+    const ssize_t n = ::recv(s.fd, reply, sizeof(reply), 0);
+    if (n <= 0) return false;
+
+    // Must leave from the redirected socket so pf can restore the resolver's address as source.
+    ::sendto(sh.dnsFd, reply, static_cast<size_t>(n), 0,
+             reinterpret_cast<const sockaddr*>(&client), sizeof(client));
+    sh.bytes += static_cast<quint64>(n);
+    return true;
+}
+
+bool isUsableDnsTarget(const sockaddr_in& a)
+{
+    const uint32_t ip = ntohl(a.sin_addr.s_addr);
+    return (ip >> 24) != 127 && ip != 0;   // loopback would feed the query back into the proxy
+}
+
 void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, const sockaddr_in& client)
 {
     const BypassConfig& cfg = sh->cfg;
@@ -533,57 +579,53 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
     const QString domain = extractDnsQuery(q, qlen);
     const bool bypass = shouldBypass(domain, cfg);
 
-    sockaddr_in target{};
-    bool haveTarget = false;
+    sockaddr_in redirect{};
+    bool haveRedirect = false;
     if (bypass) {
         in_addr a{};
         if (::inet_pton(AF_INET, cfg.dnsServer.toUtf8().constData(), &a) == 1) {
-            target.sin_len         = sizeof(target);
-            target.sin_family      = AF_INET;
-            target.sin_addr        = a;
-            target.sin_port        = htons(static_cast<uint16_t>(cfg.dnsPort));
-            haveTarget = true;
+            redirect.sin_len    = sizeof(redirect);
+            redirect.sin_family = AF_INET;
+            redirect.sin_addr   = a;
+            redirect.sin_port   = htons(static_cast<uint16_t>(cfg.dnsPort));
+            haveRedirect = isUsableDnsTarget(redirect);
         } else {
             LOG_WARN("DNS redirect: %1 is not an IPv4 address; forwarding to the original resolver",
                      cfg.dnsServer);
         }
     }
-    if (!haveTarget) {
+
+    // The resolver the client originally asked. It is the fallback when the redirect
+    // server is down, so a blocked port can never leave the Mac without DNS.
+    sockaddr_in original{};
+    bool haveOriginal = false;
+    auto lookupOriginal = [&] {
+        if (haveOriginal) return true;
         sockaddr_in local{};
         socklen_t ll = sizeof(local);
-        if (::getsockname(sh->dnsFd, reinterpret_cast<sockaddr*>(&local), &ll) < 0 ||
-            !natLookup(sh->pfFd, IPPROTO_UDP, client, local, target))
-            return;
-    }
-    const uint32_t tip = ntohl(target.sin_addr.s_addr);
-    if ((tip >> 24) == 127 || tip == 0)
-        return;
+        haveOriginal = ::getsockname(sh->dnsFd, reinterpret_cast<sockaddr*>(&local), &ll) == 0 &&
+                       natLookup(sh->pfFd, IPPROTO_UDP, client, local, original) &&
+                       isUsableDnsTarget(original);
+        return haveOriginal;
+    };
 
-    LOG_DEBUG("DNS | domain=%1 | bypass=%2 | via %3", domain, bypass ? "yes" : "no", ipString(target));
     ++sh->conns;
 
-    Fd s(::socket(AF_INET, SOCK_DGRAM, 0));
-    if (s.fd < 0) return;
-    setNoSigPipe(s.fd);
-    setCloexec(s.fd);
-    // connect() makes the kernel drop datagrams from anywhere but the resolver.
-    if (::connect(s.fd, reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0 ||
-        ::send(s.fd, query.constData(), query.size(), 0) < 0)
+    if (haveRedirect && nowMs() >= sh->dnsRedirectSkipUntilMs) {
+        LOG_DEBUG("DNS | domain=%1 | bypass=yes | via %2", domain, ipString(redirect));
+        if (forwardDns(*sh, query, redirect, client, kDnsRedirectTimeoutMs))
+            return;
+        // Skip this server for a while so later queries do not each wait for it.
+        const qint64 until = nowMs() + kDnsRedirectBackoffMs;
+        if (sh->dnsRedirectSkipUntilMs.exchange(until) < nowMs())
+            LOG_WARN("DNS redirect server %1 did not answer; using the original resolver for %2 s",
+                     ipString(redirect), kDnsRedirectBackoffMs / 1000);
+    }
+
+    if (!lookupOriginal())
         return;
-
-    pollfd p{s.fd, POLLIN, 0};
-    int r;
-    do { r = ::poll(&p, 1, 3000); } while (r < 0 && errno == EINTR);
-    if (r <= 0) return;
-
-    char reply[kDnsReplySize];
-    const ssize_t n = ::recv(s.fd, reply, sizeof(reply), 0);
-    if (n <= 0) return;
-
-    // Must leave from the redirected socket so pf can restore the resolver's address as source.
-    ::sendto(sh->dnsFd, reply, static_cast<size_t>(n), 0,
-             reinterpret_cast<const sockaddr*>(&client), sizeof(client));
-    sh->bytes += static_cast<quint64>(n);
+    LOG_DEBUG("DNS | domain=%1 | bypass=%2 | via %3", domain, haveRedirect ? "fallback" : "no", ipString(original));
+    forwardDns(*sh, query, original, client, kDnsOriginalTimeoutMs);
 }
 
 // Runs `fn` on a detached thread that keeps `sh` alive.
@@ -693,7 +735,7 @@ QByteArray buildRules(const BypassConfig& c)
 
     // QUIC hides the SNI, so Global mode drops it (as on Windows) and browsers fall back to TCP.
     if (c.mode == BypassMode::GlobalMode)
-        filter.prepend("block drop out quick proto udp from any to any port 443");
+        filter.prepend("block drop out quick proto udp from any to any port 443 user { >root }");
 
     return (trans + filter).join('\n').toUtf8() + '\n';
 }
@@ -792,6 +834,17 @@ bool PfBackend::fail(const QString& message)
     return false;
 }
 
+// Our anchor lives under "com.apple/*", which only counts if the main ruleset
+// evaluates it. VPN and firewall tools sometimes replace the stock pf.conf.
+static bool mainRulesetEvaluatesAppleAnchors()
+{
+    const PfctlResult nat   = runPfctl({"-s", "nat"});
+    const PfctlResult rules = runPfctl({"-s", "rules"});
+    if (!nat.ok || !rules.ok)
+        return true;   // cannot tell; do not touch the ruleset on a guess
+    return nat.output.contains("com.apple/*") && rules.output.contains("com.apple/*");
+}
+
 bool PfBackend::setupPf(const BypassConfig& config)
 {
     // -E takes a reference, so other pf users are unaffected when we release it.
@@ -801,6 +854,13 @@ bool PfBackend::setupPf(const BypassConfig& config)
     const QRegularExpressionMatch m = QRegularExpression("Token\\s*:\\s*(\\d+)").match(enable.output);
     m_pfToken  = m.hasMatch() ? m.captured(1) : QString();
     m_pfActive = true;
+
+    if (!mainRulesetEvaluatesAppleAnchors()) {
+        LOG_WARN0("pf main ruleset ignores com.apple/* anchors; reloading /etc/pf.conf");
+        const PfctlResult reload = runPfctl({"-f", "/etc/pf.conf"});
+        if (!reload.ok)
+            LOG_WARN("Reloading /etc/pf.conf failed: %1", reload.output);
+    }
 
     const PfctlResult load = runPfctl({"-a", m_anchor, "-f", "-"}, buildRules(config));
     if (!load.ok) {

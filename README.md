@@ -56,11 +56,17 @@ If the package does not contain the WinDivert runtime files, copy `WinDivert.dll
 
 ### macOS
 
-1. Open `PktSwerve-macOS.dmg`.
-2. Right-click `Install.command` and choose Open (needed once, the script is unsigned). It copies the app to `/Applications`, removes the quarantine flag and starts it.
-3. Or drag `PktSwerve.app` to Applications yourself, then run `xattr -dr com.apple.quarantine /Applications/PktSwerve.app` once.
+Paste this single line into Terminal. It downloads the latest build and installs it without any Gatekeeper warning (no Apple Developer account is involved: files fetched with `curl` are not quarantined):
 
-The app lives in the menu bar and asks for the administrator password when you start it.
+```bash
+curl -fsSL https://raw.githubusercontent.com/luridlane-dev/PktSwerve/main/packaging/macos/install.sh | bash
+```
+
+Then click the menu bar icon and press **Start**. macOS asks for your password once to set up the network rules. To remove the app, append `-s -- --uninstall` to `bash` in the command above.
+
+Prefer the disk image? Download `PktSwerve-macOS.dmg` from the [macos-latest release](https://github.com/luridlane-dev/PktSwerve/releases/tag/macos-latest), then right-click `Install PktSwerve.command` and choose Open. If macOS still blocks it, use System Settings → Privacy & Security → **Open Anyway**. The app is not notarized, so a browser-downloaded copy needs one of these steps.
+
+On macOS, if the configured DNS redirect server stops answering, the proxy sends queries to the resolver the system originally chose, so name resolution keeps working.
 
 ## Building
 

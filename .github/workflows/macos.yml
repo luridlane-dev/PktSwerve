@@ -6,6 +6,13 @@ on:
     branches: [main]
     paths-ignore: ['**.md']
 
+permissions:
+  contents: write   # publishes the rolling macos-latest release
+
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: macos-14
@@ -48,8 +55,9 @@ jobs:
         run: |
           mkdir dmg
           cp -R build/PktSwerve.app dmg/
-          cp packaging/macos/Install.command dmg/
-          chmod +x dmg/Install.command
+          cp packaging/macos/Install.command "dmg/Install PktSwerve.command"
+          chmod +x "dmg/Install PktSwerve.command"
+          cp packaging/macos/README.txt "dmg/READ ME FIRST.txt"
           ln -s /Applications dmg/Applications
           hdiutil create -volname PktSwerve -srcfolder dmg -ov -format UDZO PktSwerve-macOS.dmg
 
@@ -57,3 +65,13 @@ jobs:
         with:
           name: PktSwerve-macOS
           path: PktSwerve-macOS.dmg
+
+      # install.sh downloads this asset with curl, which sidesteps Gatekeeper
+      # without an Apple Developer account.
+      - name: Publish rolling release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete macos-latest --cleanup-tag --yes || true
+          gh release create macos-latest PktSwerve-macOS.dmg             --target "$GITHUB_SHA" --prerelease             --title "PktSwerve macOS (latest build)"             --notes "Install with one command: see the README. Built from $GITHUB_SHA."

@@ -8,6 +8,7 @@
 
 #include <QComboBox>
 #include <QFormLayout>
+#include <QHostInfo>
 #include <QFuture>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -161,6 +162,10 @@ QString probeHtml(const QString& ip, int port)
         }
     }
 
+    for (const DnsProbeTargetResult& r : report.targets)
+        LOG_INFO("DNS test | %1:%2 | %3 | %4", ip, port, r.target.host,
+                 r.succeeded ? QString("%1 ms").arg(r.latencyMs) : r.error);
+
     const int failures = report.targets.size() - succeeded;
     html += failures == 0
         ? QString("<span style='color:%1;'><b>Status:</b> Resolver returned usable answers.</span><br>").arg(good)
@@ -169,7 +174,20 @@ QString probeHtml(const QString& ip, int port)
     if (succeeded > 0)
         html += QString("<span style='color:%1;'>Average latency:</span> %2 ms<br>").arg(dim).arg(totalMs / succeeded);
 
-    return html + "<table width='100%' cellspacing='0' cellpadding='2'>" + rows + "</table>";
+    html += "<table width='100%' cellspacing='0' cellpadding='2'>" + rows + "</table>";
+
+    if (succeeded == 0 && !report.targets.isEmpty()) {
+        // Tell "this resolver/port is filtered" apart from "no network at all".
+        const bool online = QHostInfo::fromName("example.com").error() == QHostInfo::NoError;
+        LOG_WARN("DNS test | no answers from %1:%2 | system resolver %3", ip, port, online ? "works" : "fails");
+        html += QString("<br><span style='color:%1;'>%2</span>").arg(warn, online
+            ? "Your internet works, but this server did not answer on this port. Your network is "
+              "probably blocking it. Pick another preset (a port 53 one such as Cloudflare or "
+              "Google is the most likely to pass), then test again."
+            : "The system resolver failed as well, so there may be no internet connection, or a "
+              "VPN or firewall is blocking DNS.");
+    }
+    return html;
 }
 
 }
