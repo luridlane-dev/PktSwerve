@@ -16,12 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Qt 6.11 moved its Windows packages to a new repository layout that the released
+      # aqtinstall (3.3.0) cannot read; the fix is merged on main. Drop `aqtsource` once
+      # aqtinstall 3.4 is out.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.11.*'
           arch: win64_msvc2022_64
           cache: true
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git'
 
       # WinDivert is not stored in the repository (vendor/windivert is ignored).
       - name: Fetch WinDivert
