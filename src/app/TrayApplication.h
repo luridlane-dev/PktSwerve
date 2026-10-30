@@ -28,6 +28,9 @@ private slots:
     void onEngineError(const QString& error);
     void onUpdateAvailable(const UpdateChecker::Release& release, bool userInitiated);
     void showUpdate();
+#ifdef PLATFORM_WINDOWS
+    void onUninstall();
+#endif
 
 private:
     void buildTrayMenu();

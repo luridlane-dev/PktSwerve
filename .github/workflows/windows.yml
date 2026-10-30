@@ -57,6 +57,7 @@ jobs:
           New-Item -ItemType Directory dist/PktSwerve | Out-Null
           Copy-Item build/PktSwerve.exe dist/PktSwerve/
           Copy-Item vendor/windivert/WinDivert.dll, vendor/windivert/WinDivert64.sys dist/PktSwerve/
+          Copy-Item packaging/windows/uninstall.ps1 dist/PktSwerve/
           windeployqt --release --translations tr --no-opengl-sw --no-system-d3d-compiler dist/PktSwerve/PktSwerve.exe
           Compress-Archive -Path dist/PktSwerve -DestinationPath PktSwerve-win64.zip
 

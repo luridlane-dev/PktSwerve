@@ -23,6 +23,8 @@ Linux and Android are not supported.
 2. Extract the whole folder (keep the WinDivert files next to `PktSwerve.exe`).
 3. Run `PktSwerve.exe` and accept the administrator prompt.
 
+To remove it completely (app, startup task, WinDivert driver, settings, logs), use **Uninstall** in the tray menu, or right-click `uninstall.ps1` in the folder and choose **Run with PowerShell**. Deleting the folder alone leaves the startup task and the driver behind.
+
 ### macOS
 
 Paste this line into Terminal:

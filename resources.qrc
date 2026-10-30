@@ -8,6 +8,7 @@
 </qresource>
 <qresource prefix="/update">
     <file alias="apply-update.ps1">packaging/windows/apply-update.ps1</file>
+    <file alias="uninstall.ps1">packaging/windows/uninstall.ps1</file>
     <file alias="apply-update.sh">packaging/macos/apply-update.sh</file>
 </qresource>
 </RCC>

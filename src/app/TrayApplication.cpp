@@ -8,14 +8,20 @@
 #include <QAction>
 #include <QCursor>
 #include <QDir>
+#include <QFile>
 #include <QIcon>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
+#include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
+
+#ifdef PLATFORM_WINDOWS
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -147,6 +153,9 @@ void TrayApplication::buildTrayMenu()
     m_updateAction = m_menu->addAction(tr("Update available"), this, &TrayApplication::showUpdate);
     m_updateAction->setVisible(false);
     m_menu->addSeparator();
+#ifdef PLATFORM_WINDOWS
+    m_menu->addAction(tr("Uninstall..."), this, &TrayApplication::onUninstall);
+#endif
     m_menu->addAction(tr("Quit"), qApp, &QCoreApplication::quit);
 
 #ifndef Q_OS_MACOS
@@ -247,6 +256,58 @@ void TrayApplication::showUpdate()
     onOpenSettings();
     m_settingsWindow->showAboutTab();
 }
+
+#ifdef PLATFORM_WINDOWS
+void TrayApplication::onUninstall()
+{
+    const auto answer = QMessageBox::question(
+        nullptr, tr("Uninstall PktSwerve"),
+        tr("Remove PktSwerve, its startup task, the WinDivert driver, settings and logs from this computer?"));
+    if (answer != QMessageBox::Yes)
+        return;
+
+    // The script runs from the temp folder so it can delete the program folder, and it
+    // leaves the job the app runs in, which Task Scheduler ends together with the app.
+    const QString script = QDir::tempPath() + "/pktswerve-uninstall.ps1";
+    QFile::remove(script);
+    if (!QFile::copy(":/update/uninstall.ps1", script)) {
+        QMessageBox::critical(nullptr, tr("Error"), tr("Could not prepare the uninstall script."));
+        return;
+    }
+    QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner);
+
+    const QString powershell = qEnvironmentVariable("SystemRoot", "C:\\Windows")
+        + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+    const QStringList args = {
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+        "-File", QDir::toNativeSeparators(script),
+        "-InstallDir", QDir::toNativeSeparators(applicationDirPath()),
+        "-Quiet",
+    };
+
+    bool started = false;
+    for (bool breakaway : {true, false}) {
+        QProcess process;
+        process.setProgram(powershell);
+        process.setArguments(args);
+        process.setCreateProcessArgumentsModifier([breakaway](QProcess::CreateProcessArguments* a) {
+            a->flags &= ~(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+            a->flags |= CREATE_NO_WINDOW;
+            if (breakaway)
+                a->flags |= CREATE_BREAKAWAY_FROM_JOB;
+        });
+        if (process.startDetached()) {
+            started = true;
+            break;
+        }
+    }
+    if (!started) {
+        QMessageBox::critical(nullptr, tr("Error"), tr("Could not start the uninstall script."));
+        return;
+    }
+    quit();
+}
+#endif
 
 void TrayApplication::updateTrayIcon()
 {
