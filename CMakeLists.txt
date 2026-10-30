@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network Concurrent)
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network Concurrent)
+if(QT_VERSION_MAJOR EQUAL 6)
+    find_package(Qt6 REQUIRED COMPONENTS LinguistTools)
+endif()
 
 if(WIN32)
     add_definitions(-DPLATFORM_WINDOWS)
@@ -31,6 +34,8 @@ set(PROJECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Logger.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Theme.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Language.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app/Language.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/DomainListEditor.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/DomainListEditor.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app/ToggleSwitch.cpp
@@ -38,8 +43,15 @@ set(PROJECT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/BypassEngine.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/PacketUtils.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/AppMatcher.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/RunningApps.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/RunningApps.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/DnsProbe.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/DnsProbe.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/UpdateChecker.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/UpdateChecker.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/UpdateInstaller.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core/UpdateInstaller.h
     ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/IPlatformBackend.h
     ${CMAKE_CURRENT_SOURCE_DIR}/resources.qrc
 )
@@ -48,16 +60,21 @@ if(WIN32)
     list(APPEND PROJECT_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/WinDivertBackend.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/WinDivertBackend.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/ProcessResolver.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows/ProcessResolver.h
         ${CMAKE_CURRENT_SOURCE_DIR}/app_icon.rc
     )
 elseif(APPLE)
     list(APPEND PROJECT_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/DnsCache.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfBackend.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfHelper.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfHelper.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfIpc.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfRemoteBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/ProcessLookup.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/ProcessLookup.h
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfRemoteBackend.h
     )
 elseif(UNIX)
@@ -81,6 +98,8 @@ target_include_directories(PktSwerve PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+
+target_compile_definitions(PktSwerve PRIVATE PKTSWERVE_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(PktSwerve PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
@@ -141,5 +160,11 @@ install(TARGETS PktSwerve
 )
 
 if(QT_VERSION_MAJOR EQUAL 6)
+    # Run the update_translations target to refresh the .ts files from the sources.
+    qt_add_translations(PktSwerve
+        TS_FILES translations/pktswerve_tr.ts
+        RESOURCE_PREFIX /i18n
+        LUPDATE_OPTIONS -no-obsolete
+    )
     qt_finalize_executable(PktSwerve)
 endif()

@@ -2,6 +2,8 @@
 #include "PfBackend.h"
 #include "core/PacketUtils.h"
 #include "app/Logger.h"
+#include "DnsCache.h"
+#include "ProcessLookup.h"
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
@@ -18,6 +20,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
@@ -28,6 +31,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <thread>
 
 // State shared by the worker, the backend and all connection threads.
@@ -38,6 +42,10 @@ struct PfShared {
     std::atomic<quint64> conns{0};
     std::atomic<quint64> bytes{0};
     std::atomic<qint64>  dnsRedirectSkipUntilMs{0};   // while in the future, the redirect server is skipped
+    std::atomic<bool>    dnsFallbackLogged{false};    // each DNS warning is logged once
+    std::atomic<bool>    dnsDropLogged{false};
+    DnsCache             dnsCache;
+    ProcessLookup        processes;               // which program a connection came from
     int pfFd      = -1;       // /dev/pf, for DIOCNATLOOK
     int dnsFd     = -1;       // UDP listener; replies must leave from it
     int wakeFd[2] = {-1, -1}; // self-pipe that wakes poll() on stop
@@ -76,6 +84,7 @@ constexpr int kDnsReplySize     = 8192;
 constexpr int kDnsThreads       = 16;
 constexpr int kDnsRedirectTimeoutMs = 1500;   // after this, ask the resolver the client originally chose
 constexpr int kDnsOriginalTimeoutMs = 3000;
+constexpr int kDnsAttempts          = 3;      // UDP gets lost: ask again within the timeout
 constexpr int kDnsRedirectBackoffMs = 30000;  // how long a silent redirect server is skipped
 
 qint64 nowMs()
@@ -453,7 +462,9 @@ bool looksLikeHttp(const QByteArray& d)
 
 // Decides whether to bypass and writes the first flight to the server
 // (possibly split / re-framed).  Everything after this is a plain relay.
-bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int upstreamFd)
+// `fromSelectedApp` is asked only when the site alone does not decide, because it is the costlier check.
+bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int upstreamFd,
+                     const std::function<bool()>& fromSelectedApp)
 {
     const auto* p = reinterpret_cast<const uint8_t*>(data.constData());
     const uint32_t n = static_cast<uint32_t>(data.size());
@@ -464,7 +475,7 @@ bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int ups
                            p[0] == TLS_HANDSHAKE && p[1] == 0x03 && p[2] <= 0x03;
         if (hello) {
             const QString sni = extractSNI(p, n);
-            const bool bypass = !sni.isEmpty() && shouldBypass(sni, cfg);
+            const bool bypass = matchesSiteOrApp(!sni.isEmpty() && shouldBypass(sni, cfg), cfg, fromSelectedApp);
             LOG_INFO("TLS ClientHello | SNI=%1 | bypass=%2 | pLen=%3",
                      sni.isEmpty() ? "(none)" : sni, bypass ? "yes" : "no", n);
             if (bypass) {
@@ -484,7 +495,7 @@ bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int ups
         }
     } else if (cfg.fragmentHttpRequests && looksLikeHttp(data)) {
         const QString host = extractHttpHost(p, n);
-        const bool bypass = shouldBypass(host, cfg);
+        const bool bypass = matchesSiteOrApp(shouldBypass(host, cfg), cfg, fromSelectedApp);
         LOG_INFO("HTTP request | Host=%1 | bypass=%2 | pLen=%3",
                  host.isEmpty() ? "(none)" : host, bypass ? "yes" : "no", n);
         if (bypass)
@@ -496,6 +507,7 @@ bool sendFirstFlight(const BypassConfig& cfg, bool tls, QByteArray data, int ups
 
 void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
 {
+    const qint64 acceptedAt = nowMs();   // the client's socket exists from here on
     Fd client(clientFd);
     setNoSigPipe(clientFd);
     setNoDelay(clientFd);
@@ -528,7 +540,11 @@ void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
         return;
     }
     ++sh->conns;
-    if (!sendFirstFlight(sh->cfg, tls, first, upstream.fd))
+    const auto fromSelectedApp = [&] {
+        return sh->processes.belongsToApp(sh->cfg.apps, ntohs(peer.sin_port), ntohs(dst.sin_port),
+                                          acceptedAt);
+    };
+    if (!sendFirstFlight(sh->cfg, tls, first, upstream.fd, fromSelectedApp))
         return;
     sh->bytes += static_cast<quint64>(first.size());
 
@@ -536,33 +552,46 @@ void handleTcp(const std::shared_ptr<PfShared>& sh, int clientFd, int proxyPort)
 }
 
 // Sends the query to `target` and relays the first reply back to `client`.
-// Returns false if no reply arrives within `timeoutMs`.
+// UDP packets get lost, so the query is repeated a few times within `timeoutMs`
+// instead of waiting out a single long timeout. Returns false if no reply arrives.
+// The answer is remembered only if `cacheable`: a reply from a stand-in resolver
+// must not be replayed once the intended one is back.
 bool forwardDns(PfShared& sh, const QByteArray& query, const sockaddr_in& target,
-                const sockaddr_in& client, int timeoutMs)
+                const sockaddr_in& client, int timeoutMs, bool cacheable)
 {
     Fd s(::socket(AF_INET, SOCK_DGRAM, 0));
     if (s.fd < 0) return false;
     setNoSigPipe(s.fd);
     setCloexec(s.fd);
     // connect() makes the kernel drop datagrams from anywhere but the resolver.
-    if (::connect(s.fd, reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0 ||
-        ::send(s.fd, query.constData(), query.size(), 0) < 0)
+    if (::connect(s.fd, reinterpret_cast<const sockaddr*>(&target), sizeof(target)) < 0)
         return false;
 
-    pollfd p{s.fd, POLLIN, 0};
-    int r;
-    do { r = ::poll(&p, 1, timeoutMs); } while (r < 0 && errno == EINTR);
-    if (r <= 0) return false;
-
+    const int sliceMs = timeoutMs / kDnsAttempts;
     char reply[kDnsReplySize];
-    const ssize_t n = ::recv(s.fd, reply, sizeof(reply), 0);
-    if (n <= 0) return false;
+    for (int attempt = 0; attempt < kDnsAttempts; ++attempt) {
+        if (::send(s.fd, query.constData(), query.size(), 0) < 0)
+            return false;
 
-    // Must leave from the redirected socket so pf can restore the resolver's address as source.
-    ::sendto(sh.dnsFd, reply, static_cast<size_t>(n), 0,
-             reinterpret_cast<const sockaddr*>(&client), sizeof(client));
-    sh.bytes += static_cast<quint64>(n);
-    return true;
+        pollfd p{s.fd, POLLIN, 0};
+        int r;
+        do { r = ::poll(&p, 1, sliceMs); } while (r < 0 && errno == EINTR);
+        if (r <= 0) continue;
+
+        const ssize_t n = ::recv(s.fd, reply, sizeof(reply), 0);
+        if (n < 0 && errno == ECONNREFUSED)
+            return false;   // the resolver answered with "port unreachable": no point in waiting
+        if (n <= 0) continue;
+
+        if (cacheable)
+            sh.dnsCache.store(query, QByteArray(reply, static_cast<int>(n)));
+        // Must leave from the redirected socket so pf can restore the resolver's address as source.
+        ::sendto(sh.dnsFd, reply, static_cast<size_t>(n), 0,
+                 reinterpret_cast<const sockaddr*>(&client), sizeof(client));
+        sh.bytes += static_cast<quint64>(n);
+        return true;
+    }
+    return false;
 }
 
 bool isUsableDnsTarget(const sockaddr_in& a)
@@ -571,14 +600,44 @@ bool isUsableDnsTarget(const sockaddr_in& a)
     return (ip >> 24) != 127 && ip != 0;   // loopback would feed the query back into the proxy
 }
 
+// First IPv4 nameserver in /etc/resolv.conf, which macOS keeps in step with the active network.
+bool systemResolver(sockaddr_in& out)
+{
+    QFile f("/etc/resolv.conf");
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+    while (!f.atEnd()) {
+        const QList<QByteArray> words = f.readLine().simplified().split(' ');
+        if (words.size() < 2 || words.at(0) != "nameserver")
+            continue;
+        in_addr a{};
+        if (::inet_pton(AF_INET, words.at(1).constData(), &a) != 1)
+            continue;
+        out = {};
+        out.sin_len    = sizeof(out);
+        out.sin_family = AF_INET;
+        out.sin_addr   = a;
+        out.sin_port   = htons(53);
+        return isUsableDnsTarget(out);
+    }
+    return false;
+}
+
 void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, const sockaddr_in& client)
 {
+    const QByteArray cached = sh->dnsCache.lookup(query);
+    if (!cached.isEmpty()) {
+        ::sendto(sh->dnsFd, cached.constData(), static_cast<size_t>(cached.size()), 0,
+                 reinterpret_cast<const sockaddr*>(&client), sizeof(client));
+        return;
+    }
+
     const BypassConfig& cfg = sh->cfg;
     const auto* q = reinterpret_cast<const uint8_t*>(query.constData());
     const uint32_t qlen = static_cast<uint32_t>(query.size());
 
     const QString domain = extractDnsQuery(q, qlen);
-    const bool bypass = shouldBypass(domain, cfg);
+    const bool bypass = dnsRedirectApplies(domain, cfg);
 
     sockaddr_in redirect{};
     bool haveRedirect = false;
@@ -596,8 +655,9 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
         }
     }
 
-    // The resolver the client originally asked. It is the fallback when the redirect
-    // server is down, so a blocked port can never leave the Mac without DNS.
+    // The resolver the client originally asked. It serves every domain that is not
+    // redirected (outside Selected Sites & Apps) and is the fallback when the redirect server is down,
+    // so a blocked port can never leave the Mac without DNS.
     sockaddr_in original{};
     bool haveOriginal = false;
     auto lookupOriginal = [&] {
@@ -607,6 +667,12 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
         haveOriginal = ::getsockname(sh->dnsFd, reinterpret_cast<sockaddr*>(&local), &ll) == 0 &&
                        natLookup(sh->pfFd, IPPROTO_UDP, client, local, original) &&
                        isUsableDnsTarget(original);
+        if (!haveOriginal && systemResolver(original)) {
+            haveOriginal = true;
+            if (!sh->dnsFallbackLogged.exchange(true))
+                LOG_WARN0("Could not tell which resolver a DNS query was meant for; "
+                          "using the one from /etc/resolv.conf instead");
+        }
         return haveOriginal;
     };
 
@@ -614,7 +680,7 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
 
     if (haveRedirect && nowMs() >= sh->dnsRedirectSkipUntilMs) {
         LOG_DEBUG("DNS | domain=%1 | bypass=yes | via %2", domain, ipString(redirect));
-        if (forwardDns(*sh, query, redirect, client, kDnsRedirectTimeoutMs))
+        if (forwardDns(*sh, query, redirect, client, kDnsRedirectTimeoutMs, true))
             return;
         // Skip this server for a while so later queries do not each wait for it.
         const qint64 until = nowMs() + kDnsRedirectBackoffMs;
@@ -623,10 +689,15 @@ void handleDns(const std::shared_ptr<PfShared>& sh, const QByteArray& query, con
                      ipString(redirect), kDnsRedirectBackoffMs / 1000);
     }
 
-    if (!lookupOriginal())
+    if (!lookupOriginal()) {
+        if (!sh->dnsDropLogged.exchange(true))
+            LOG_WARN0("No resolver found for a DNS query; it was dropped");
         return;
+    }
     LOG_DEBUG("DNS | domain=%1 | bypass=%2 | via %3", domain, haveRedirect ? "fallback" : "no", ipString(original));
-    forwardDns(*sh, query, original, client, kDnsOriginalTimeoutMs);
+    // Cached only when the original resolver is the intended one for this name (it is not
+    // when the redirect server was skipped or failed).
+    forwardDns(*sh, query, original, client, kDnsOriginalTimeoutMs, !haveRedirect);
 }
 
 // Runs `fn` on a detached thread that keeps `sh` alive.

@@ -6,4 +6,8 @@
     <file alias="chevron.png">resources/icons/chevron.png</file>
     <file alias="chevron@2x.png">resources/icons/chevron@2x.png</file>
 </qresource>
+<qresource prefix="/update">
+    <file alias="apply-update.ps1">packaging/windows/apply-update.ps1</file>
+    <file alias="apply-update.sh">packaging/macos/apply-update.sh</file>
+</qresource>
 </RCC>

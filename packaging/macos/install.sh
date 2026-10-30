@@ -5,14 +5,16 @@
 #   curl -fsSL https://raw.githubusercontent.com/luridlane-dev/PktSwerve/main/packaging/macos/install.sh | bash
 #
 # Options (pass after `bash -s --`):
-#   --uninstall   remove the app and its login item
+#   --uninstall   run uninstall.sh (removes the app, helper, pf rules, settings)
 #   --dmg FILE    install from a local DMG instead of downloading
 set -euo pipefail
 
-DMG_URL="${PKTSWERVE_DMG_URL:-https://github.com/luridlane-dev/PktSwerve/releases/download/macos-latest/PktSwerve-macOS.dmg}"
+DMG_URL="${PKTSWERVE_DMG_URL:-https://github.com/luridlane-dev/PktSwerve/releases/latest/download/PktSwerve-macOS.dmg}"
+# Used when no versioned release exists yet (or the override above was not set and the lookup failed).
+FALLBACK_DMG_URL="https://github.com/luridlane-dev/PktSwerve/releases/download/macos-latest/PktSwerve-macOS.dmg"
 APPS_DIR="${PKTSWERVE_APPS_DIR:-/Applications}"
 APP="$APPS_DIR/PktSwerve.app"
-AGENT="$HOME/Library/LaunchAgents/com.pktswerve.app.plist"
+UNINSTALL_URL="${PKTSWERVE_UNINSTALL_URL:-https://raw.githubusercontent.com/luridlane-dev/PktSwerve/main/packaging/macos/uninstall.sh}"
 
 say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mError:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -29,12 +31,9 @@ quit_app() {
 }
 
 if [ "${1:-}" = "--uninstall" ]; then
-    say "Removing PktSwerve"
-    quit_app
-    priv rm -rf "$APP"
-    rm -f "$AGENT"
-    say "Done. Settings stay in ~/Library/Preferences and ~/Library/Application Support/PktSwerve."
-    exit 0
+    shift
+    curl -fsSL "$UNINSTALL_URL" | bash -s -- "$@"
+    exit $?
 fi
 
 LOCAL_DMG=""
@@ -56,8 +55,18 @@ if [ -n "$LOCAL_DMG" ]; then
 else
     DMG="$WORK/PktSwerve.dmg"
     say "Downloading PktSwerve"
-    curl -fL --progress-bar -o "$DMG" "$DMG_URL" \
-        || fail "Download failed. Check your internet connection and try again."
+    if ! curl -fL --progress-bar -o "$DMG" "$DMG_URL"; then
+        [ -z "${PKTSWERVE_DMG_URL:-}" ] || fail "Download failed: $DMG_URL"
+        curl -fL --progress-bar -o "$DMG" "$FALLBACK_DMG_URL" \
+            || fail "Download failed. Check your internet connection and try again."
+    fi
+fi
+
+# Stray helper processes, pf rules and sockets of an earlier version would
+# interfere with the new one; the settings and the login item are left alone.
+say "Checking for leftovers of an earlier install"
+if ! curl -fsSL "$UNINSTALL_URL" | bash -s -- --clean-only; then
+    say "Could not finish the leftover check, continuing anyway"
 fi
 
 say "Installing to $APPS_DIR"

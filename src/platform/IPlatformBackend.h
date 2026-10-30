@@ -35,6 +35,7 @@ struct BypassConfig {
 
     QStringList blacklist;
     QStringList whitelist;
+    QStringList apps;       // Selected Sites & Apps mode: executables (see core/AppMatcher.h)
 };
 
 class IPlatformBackend : public QObject {

@@ -1,10 +1,13 @@
 #include "SettingsWindow.h"
 #include "app/DomainListEditor.h"
+#include "app/Language.h"
 #include "app/Logger.h"
 #include "app/Theme.h"
 #include "app/ToggleSwitch.h"
 #include "core/BypassEngine.h"
 #include "core/DnsProbe.h"
+#include "core/UpdateChecker.h"
+#include "core/UpdateInstaller.h"
 
 #include <QComboBox>
 #include <QFormLayout>
@@ -136,16 +139,16 @@ QString probeHtml(const QString& ip, int port)
 
     QHostAddress server;
     if (!server.setAddress(ip))
-        return QString("<span style='color:%1;'><b>Invalid DNS server address.</b></span>").arg(bad);
+        return QString("<span style='color:%1;'><b>%2</b></span>").arg(bad, QCoreApplication::translate("SettingsWindow", "Invalid DNS server address."));
 
     const DnsProbeReport report = DnsProbe::probe(
         server, static_cast<quint16>(port), DnsProbe::defaultTargets());
 
-    QString html = QString("<span style='font-size:14px; font-weight:600;'>Target Server: %1:%2</span><br>")
-                       .arg(ip).arg(port);
+    QString html = QString("<span style='font-size:14px; font-weight:600;'>%1</span><br>")
+                       .arg(QCoreApplication::translate("SettingsWindow", "Target Server: %1:%2").arg(ip).arg(port));
     if (!report.serverError.isEmpty())
-        return html + QString("<span style='color:%1;'><b>Test error:</b> %2</span>")
-                          .arg(bad, report.serverError.toHtmlEscaped());
+        return html + QString("<span style='color:%1;'><b>%2</b> %3</span>")
+                          .arg(bad, QCoreApplication::translate("SettingsWindow", "Test error:"), report.serverError.toHtmlEscaped());
 
     qint64 totalMs = 0;
     int succeeded = 0;
@@ -168,11 +171,14 @@ QString probeHtml(const QString& ip, int port)
 
     const int failures = report.targets.size() - succeeded;
     html += failures == 0
-        ? QString("<span style='color:%1;'><b>Status:</b> Resolver returned usable answers.</span><br>").arg(good)
-        : QString("<span style='color:%1;'><b>Resolver warning:</b> %2 domain(s) had no usable answer.</span><br>")
-              .arg(warn).arg(failures);
+        ? QString("<span style='color:%1;'><b>%2</b> %3</span><br>")
+              .arg(good, QCoreApplication::translate("SettingsWindow", "Status:"), QCoreApplication::translate("SettingsWindow", "Resolver returned usable answers."))
+        : QString("<span style='color:%1;'><b>%2</b> %3</span><br>")
+              .arg(warn, QCoreApplication::translate("SettingsWindow", "Resolver warning:"),
+                   QCoreApplication::translate("SettingsWindow", "%1 domain(s) had no usable answer.").arg(failures));
     if (succeeded > 0)
-        html += QString("<span style='color:%1;'>Average latency:</span> %2 ms<br>").arg(dim).arg(totalMs / succeeded);
+        html += QString("<span style='color:%1;'>%2</span> %3 ms<br>")
+                    .arg(dim, QCoreApplication::translate("SettingsWindow", "Average latency:"), QString::number(totalMs / succeeded));
 
     html += "<table width='100%' cellspacing='0' cellpadding='2'>" + rows + "</table>";
 
@@ -181,11 +187,11 @@ QString probeHtml(const QString& ip, int port)
         const bool online = QHostInfo::fromName("example.com").error() == QHostInfo::NoError;
         LOG_WARN("DNS test | no answers from %1:%2 | system resolver %3", ip, port, online ? "works" : "fails");
         html += QString("<br><span style='color:%1;'>%2</span>").arg(warn, online
-            ? "Your internet works, but this server did not answer on this port. Your network is "
+            ? QCoreApplication::translate("SettingsWindow", "Your internet works, but this server did not answer on this port. Your network is "
               "probably blocking it. Pick another preset (a port 53 one such as Cloudflare or "
-              "Google is the most likely to pass), then test again."
-            : "The system resolver failed as well, so there may be no internet connection, or a "
-              "VPN or firewall is blocking DNS.");
+              "Google is the most likely to pass), then test again.")
+            : QCoreApplication::translate("SettingsWindow", "The system resolver failed as well, so there may be no internet connection, or a "
+              "VPN or firewall is blocking DNS."));
     }
     return html;
 }
@@ -193,10 +199,11 @@ QString probeHtml(const QString& ip, int port)
 }
 
 
-SettingsWindow::SettingsWindow(BypassEngine* engine, QWidget* parent)
-    : QMainWindow(parent), m_engine(engine)
+SettingsWindow::SettingsWindow(BypassEngine* engine, UpdateChecker* updates, UpdateInstaller* installer,
+                               QWidget* parent)
+    : QMainWindow(parent), m_engine(engine), m_updates(updates), m_installer(installer)
 {
-    setWindowTitle("PktSwerve Settings");
+    setWindowTitle(tr("PktSwerve Settings"));
     setMinimumSize(680, 720);
     buildUi();
     loadToUi(m_engine->config());
@@ -216,23 +223,23 @@ void SettingsWindow::buildUi()
 
     using Builder = void (SettingsWindow::*)(QWidget*);
     const std::pair<const char*, Builder> tabs[] = {
-        {"General",     &SettingsWindow::buildGeneralTab},
-        {"Methods",     &SettingsWindow::buildMethodsTab},
-        {"DNS",         &SettingsWindow::buildDnsTab},
-        {"Domain List", &SettingsWindow::buildHostlistTab},
-        {"About",       &SettingsWindow::buildAboutTab},
+        {QT_TR_NOOP("General"),       &SettingsWindow::buildGeneralTab},
+        {QT_TR_NOOP("Methods"),       &SettingsWindow::buildMethodsTab},
+        {QT_TR_NOOP("DNS"),           &SettingsWindow::buildDnsTab},
+        {QT_TR_NOOP("Sites && Apps"), &SettingsWindow::buildHostlistTab},
+        {QT_TR_NOOP("About"),         &SettingsWindow::buildAboutTab},
     };
     m_tabs = new QTabWidget;
     for (const auto& [title, build] : tabs) {
         auto* page = new QWidget;
         (this->*build)(page);
-        m_tabs->addTab(page, title);
+        m_tabs->addTab(page, tr(title));
     }
     mainLay->addWidget(m_tabs, 1);
 
-    auto* resetBtn  = new QPushButton("Reset to Defaults");
-    auto* cancelBtn = new QPushButton("Cancel");
-    auto* applyBtn  = new QPushButton("Apply");
+    auto* resetBtn  = new QPushButton(tr("Reset to Defaults"));
+    auto* cancelBtn = new QPushButton(tr("Cancel"));
+    auto* applyBtn  = new QPushButton(tr("Apply"));
     resetBtn->setObjectName("destructiveBtn");
     applyBtn->setObjectName("primaryBtn");
 
@@ -253,24 +260,35 @@ void SettingsWindow::buildGeneralTab(QWidget* tab)
 {
     QVBoxLayout* lay = makePageLayout(tab);
 
-    QGroupBox* modeGroup = makeGroup("OPERATING MODE");
+    QGroupBox* modeGroup = makeGroup(tr("OPERATING MODE"));
     m_modeCombo = new QComboBox;
-    m_modeCombo->addItem("Disabled",            static_cast<int>(BypassMode::Disabled));
-    m_modeCombo->addItem("Selected Sites Only", static_cast<int>(BypassMode::BlacklistMode));
-    m_modeCombo->addItem("Global",              static_cast<int>(BypassMode::GlobalMode));
+    m_modeCombo->addItem(tr("Disabled"),              static_cast<int>(BypassMode::Disabled));
+    m_modeCombo->addItem(tr("Selected Sites & Apps"), static_cast<int>(BypassMode::BlacklistMode));
+    m_modeCombo->addItem(tr("Global"),                static_cast<int>(BypassMode::GlobalMode));
     modeGroup->layout()->addWidget(m_modeCombo);
     modeGroup->layout()->addWidget(makeLabel(
-        "Selected Sites Only bypasses just the domains in the Domain List tab.\n"
-        "Global affects all HTTP/HTTPS traffic.", "note"));
+        tr("Selected Sites & Apps applies PktSwerve only to the sites and apps on the Sites & Apps tab.\n"
+           "Global affects all HTTP/HTTPS traffic."), "note"));
     lay->addWidget(modeGroup);
 
-    QGroupBox* sysGroup = makeGroup("SYSTEM");
+    QGroupBox* sysGroup = makeGroup(tr("SYSTEM"));
 #ifdef PLATFORM_MACOS
-    m_autoStartCheck = addSwitch(sysGroup, "Launch at login");
+    m_autoStartCheck = addSwitch(sysGroup, tr("Launch at login"),
+        tr("Starts PktSwerve in the menu bar. You still press Start to connect."));
 #else
-    m_autoStartCheck = addSwitch(sysGroup, "Launch at Windows startup");
+    m_autoStartCheck = addSwitch(sysGroup, tr("Launch at Windows startup"));
 #endif
     lay->addWidget(sysGroup);
+
+    QGroupBox* langGroup = makeGroup(tr("LANGUAGE"));
+    m_languageCombo = new QComboBox;
+    m_languageCombo->addItem("English", "en");
+    m_languageCombo->addItem(QString::fromUtf8("T\xC3\xBCrk\xC3\xA7" "e"), "tr");
+    m_languageCombo->setCurrentIndex(qMax(0, m_languageCombo->findData(Language::saved())));
+    langGroup->layout()->addWidget(m_languageCombo);
+    langGroup->layout()->addWidget(makeLabel(
+        tr("The language changes the next time PktSwerve starts."), "note"));
+    lay->addWidget(langGroup);
     lay->addStretch();
 
     connect(m_modeCombo, &QComboBox::currentIndexChanged, this, &SettingsWindow::onModeChanged);
@@ -287,61 +305,61 @@ void SettingsWindow::buildMethodsTab(QWidget* tab)
 
     QVBoxLayout* lay = makePageLayout(content);
 
-    QGroupBox* fragGroup = makeGroup("FRAGMENTATION");
-    m_fragHttps = addSwitch(fragGroup, "HTTPS / TLS ClientHello fragmentation",
-        "Splits the TLS handshake packet so the SNI (target domain) doesn't appear "
-        "in a single packet. Primary bypass method.");
-    m_fragHttp = addSwitch(fragGroup, "HTTP fragmentation",
-        "Fragments plaintext HTTP on port 80. Rarely needed since most sites use HTTPS.");
-    m_reverseFrag = addSwitch(fragGroup, "Send fragments in reverse order",
-        "Sends fragment 2 before fragment 1. May confuse additional DPI systems; "
-        "disable if connections break.");
+    QGroupBox* fragGroup = makeGroup(tr("FRAGMENTATION"));
+    m_fragHttps = addSwitch(fragGroup, tr("HTTPS / TLS ClientHello fragmentation"),
+        tr("Splits the TLS handshake packet so the SNI (target domain) doesn't appear "
+           "in a single packet. Primary bypass method."));
+    m_fragHttp = addSwitch(fragGroup, tr("HTTP fragmentation"),
+        tr("Fragments plaintext HTTP on port 80. Rarely needed since most sites use HTTPS."));
+    m_reverseFrag = addSwitch(fragGroup, tr("Send fragments in reverse order"),
+        tr("Sends fragment 2 before fragment 1. May confuse additional DPI systems; "
+           "disable if connections break."));
 #ifdef PLATFORM_MACOS
-    m_tlsRecSplit = addSwitch(fragGroup, "Split TLS record at the SNI",
-        "Re-frames the ClientHello as two TLS records cut in the middle of the domain name, "
-        "so DPI that reassembles TCP segments still can't read it. "
-        "Disable if some sites stop loading.");
+    m_tlsRecSplit = addSwitch(fragGroup, tr("Split TLS record at the SNI"),
+        tr("Re-frames the ClientHello as two TLS records cut in the middle of the domain name, "
+           "so DPI that reassembles TCP segments still can't read it. "
+           "Disable if some sites stop loading."));
 #endif
 
     m_httpFragSize  = makeSpin(1, 512);
     m_httpsFragSize = makeSpin(1, 512);
     auto* sizes = new QFormLayout;
-    sizes->addRow("HTTP fragment size (bytes):",  m_httpFragSize);
-    sizes->addRow("HTTPS fragment size (bytes):", m_httpsFragSize);
+    sizes->addRow(tr("HTTP fragment size (bytes):"),  m_httpFragSize);
+    sizes->addRow(tr("HTTPS fragment size (bytes):"), m_httpsFragSize);
     addForm(fragGroup, sizes);
     fragGroup->layout()->addWidget(makeLabel(
-        "Default of 2 bytes is optimal. Larger values may bypass certain DPI types.", "note"));
+        tr("Default of 2 bytes is optimal. Larger values may bypass certain DPI types."), "note"));
     lay->addWidget(fragGroup);
 
-    QGroupBox* fakeGroup = makeGroup("DECEPTION PACKET TECHNIQUES");
-    m_fakePackets = addSwitch(fakeGroup, "Low-TTL fake packet",
-        "Sends a decoy packet the DPI sees but drops before reaching the real server "
-        "due to low TTL. Works best combined with fragmentation.");
-    m_wrongChecksum = addSwitch(fakeGroup, "Wrong TCP checksum fake packet",
-        "Confuses DPI systems that skip checksum validation. The real server rejects "
-        "the packet, but the DPI context table is corrupted.");
-    m_wrongSeq = addSwitch(fakeGroup, "Wrong sequence number fake packet",
-        "Disrupts DPI TCP stream reassembly. Aggressive; try disabling if other methods "
-        "cause issues.");
+    QGroupBox* fakeGroup = makeGroup(tr("DECEPTION PACKET TECHNIQUES"));
+    m_fakePackets = addSwitch(fakeGroup, tr("Low-TTL fake packet"),
+        tr("Sends a decoy packet the DPI sees but drops before reaching the real server "
+           "due to low TTL. Works best combined with fragmentation."));
+    m_wrongChecksum = addSwitch(fakeGroup, tr("Wrong TCP checksum fake packet"),
+        tr("Confuses DPI systems that skip checksum validation. The real server rejects "
+           "the packet, but the DPI context table is corrupted."));
+    m_wrongSeq = addSwitch(fakeGroup, tr("Wrong sequence number fake packet"),
+        tr("Disrupts DPI TCP stream reassembly. Aggressive; try disabling if other methods "
+           "cause issues."));
 
-    m_voiceUdp = addSwitch(fakeGroup, "Voice call decoys (UDP)",
-        "Sends a few decoy datagrams before the 74-byte discovery packet that starts a "
-        "voice call, so the call connects. Applies to every app that makes such a call.");
+    m_voiceUdp = addSwitch(fakeGroup, tr("Voice call decoys (UDP)"),
+        tr("Sends a few decoy datagrams before the 74-byte discovery packet that starts a "
+           "voice call, so the call connects. Applies to every app that makes such a call."));
 
     m_fakeTTL = makeSpin(1, 128);
     m_fakeTTL->setValue(8);
     auto* ttl = new QFormLayout;
-    ttl->addRow("Fake packet TTL:", m_fakeTTL);
+    ttl->addRow(tr("Fake packet TTL:"), m_fakeTTL);
     addForm(fakeGroup, ttl);
     fakeGroup->layout()->addWidget(makeLabel(
-        "Highest fake packet lifetime in hops. It is lowered per server once the distance is known; "
-        "too high and the packet may reach the destination.", "note"));
+        tr("Highest fake packet lifetime in hops. It is lowered per server once the distance is known; "
+           "too high and the packet may reach the destination."), "note"));
     lay->addWidget(fakeGroup);
     lay->addStretch();
 
 #ifdef PLATFORM_MACOS
     // The proxy backend cannot reorder segments or craft invalid packets.
-    const QString unsupported = "Not available on macOS (proxy-based backend).";
+    const QString unsupported = tr("Not available on macOS (proxy-based backend).");
     for (QWidget* w : QList<QWidget*>{m_reverseFrag, m_fakePackets, m_wrongChecksum, m_wrongSeq, m_voiceUdp, m_fakeTTL}) {
         w->setEnabled(false);
         w->setToolTip(unsupported);
@@ -355,30 +373,33 @@ void SettingsWindow::buildDnsTab(QWidget* tab)
 {
     QVBoxLayout* lay = makePageLayout(tab);
 
-    QGroupBox* enableGroup = makeGroup("DNS REDIRECT");
-    m_dnsRedirect = addSwitch(enableGroup, "Enable DNS redirect",
-        "Routes DNS queries to the server below instead of your ISP's DNS.");
+    QGroupBox* enableGroup = makeGroup(tr("DNS REDIRECT"));
+    m_dnsRedirect = addSwitch(enableGroup, tr("Enable DNS redirect"),
+        tr("Routes DNS queries to the server below instead of your ISP's DNS. In Selected Sites & Apps mode "
+           "only the listed sites are redirected, or every query once apps are listed "
+           "(a DNS query does not say which app sent it). Local names (no dot, .local, .lan, "
+           ".home, .internal) always keep using your network's DNS."));
     lay->addWidget(enableGroup);
 
-    QGroupBox* presetGroup = makeGroup("PRESET SERVERS");
+    QGroupBox* presetGroup = makeGroup(tr("PRESET SERVERS"));
     m_dnsPresetCombo = new QComboBox;
-    m_dnsPresetCombo->addItem("Manual entry");
+    m_dnsPresetCombo->addItem(tr("Manual entry"));
     for (const DnsPreset& p : kDnsPresets)
         m_dnsPresetCombo->addItem(QString("%1 — %2:%3").arg(p.name, p.ip).arg(p.port));
     presetGroup->layout()->addWidget(m_dnsPresetCombo);
     connect(m_dnsPresetCombo, &QComboBox::currentIndexChanged, this, &SettingsWindow::onDnsPresetSelected);
 
-    QGroupBox* addressGroup = new QGroupBox("SERVER ADDRESS");
+    QGroupBox* addressGroup = new QGroupBox(tr("SERVER ADDRESS"));
     auto* form = new QFormLayout(addressGroup);
     m_dnsServer = new QLineEdit;
-    m_dnsServer->setPlaceholderText("e.g. 9.9.9.10");
+    m_dnsServer->setPlaceholderText(tr("e.g. 9.9.9.10"));
     m_dnsPort = makeSpin(1, 65535);
     form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-    form->addRow("IP Address:", m_dnsServer);
-    form->addRow("Port:",       m_dnsPort);
+    form->addRow(tr("IP Address:"), m_dnsServer);
+    form->addRow(tr("Port:"),       m_dnsPort);
 
-    QGroupBox* testGroup = makeGroup("CONNECTIVITY TEST");
-    m_checkBtn = new QPushButton("Test Connection");
+    QGroupBox* testGroup = makeGroup(tr("CONNECTIVITY TEST"));
+    m_checkBtn = new QPushButton(tr("Test Connection"));
     m_checkBtn->setObjectName("primaryBtn");
     connect(m_checkBtn, &QPushButton::clicked, this, &SettingsWindow::onCheckConnectivity);
     m_dnsStatusLabel = new QTextEdit;
@@ -401,16 +422,30 @@ void SettingsWindow::buildDnsTab(QWidget* tab)
 
 void SettingsWindow::buildHostlistTab(QWidget* tab)
 {
-    m_hostListWidget = tab;
     QVBoxLayout* lay = makePageLayout(tab);
 
+    lay->addWidget(makeLabel(tr("Sites & Apps"), "heading"));
     lay->addWidget(makeLabel(
-        "Type a domain and press Enter. Subdomains match automatically "
-        "(e.g. 'example.com' also covers 'api.example.com').", "note"));
-    lay->addWidget(makeLabel("Bypass List", "heading"));
+        tr("PktSwerve only works on the sites and apps listed here. Everything else keeps using "
+           "your normal connection."), "note"));
+    m_hostListHint = makeLabel(
+        tr("These lists are only used in Selected Sites & Apps mode. Change the mode on the General tab."), "note");
+    lay->addWidget(m_hostListHint);
 
-    m_blacklist = new DomainListEditor;
-    lay->addWidget(m_blacklist, 1);
+    QGroupBox* sitesGroup = makeGroup(tr("SITES"));
+    sitesGroup->layout()->addWidget(makeLabel(
+        tr("A site also covers its subdomains: 'example.com' includes 'api.example.com'."), "note"));
+    m_blacklist = new DomainListEditor(DomainListEditor::Kind::Domains);
+    sitesGroup->layout()->addWidget(m_blacklist);
+    lay->addWidget(sitesGroup, 1);
+
+    QGroupBox* appsGroup = makeGroup(tr("APPS"));
+    appsGroup->layout()->addWidget(makeLabel(
+        tr("Every connection of a listed program is processed, whatever site it talks to. "
+           "Type a name such as discord.exe, or use Browse and Running."), "note"));
+    m_apps = new DomainListEditor(DomainListEditor::Kind::Apps);
+    appsGroup->layout()->addWidget(m_apps);
+    lay->addWidget(appsGroup, 1);
 }
 
 
@@ -420,25 +455,107 @@ void SettingsWindow::buildAboutTab(QWidget* tab)
     lay->setSpacing(6);
 
     lay->addWidget(makeLabel("PktSwerve", "title"));
-    lay->addWidget(makeLabel("Version " + QCoreApplication::applicationVersion(), "note"));
+    lay->addWidget(makeLabel(tr("Version %1").arg(QCoreApplication::applicationVersion()), "note"));
+    lay->addSpacing(8);
+
+    auto* updateRow = new QHBoxLayout;
+    m_updateBtn = new QPushButton(tr("Check for updates"));
+    updateRow->addWidget(m_updateBtn);
+    m_installBtn = new QPushButton;
+    m_installBtn->setVisible(false);
+    updateRow->addWidget(m_installBtn);
+    m_updateStatus = makeLabel({}, "note");
+    m_updateStatus->setTextFormat(Qt::RichText);
+    m_updateStatus->setOpenExternalLinks(true);
+    updateRow->addWidget(m_updateStatus, 1);
+    lay->addLayout(updateRow);
+
+    auto* autoCheck = new SwitchBox(tr("Check for updates automatically"));
+    autoCheck->setChecked(m_updates->autoCheckEnabled());
+    lay->addWidget(autoCheck);
+    connect(autoCheck, &QCheckBox::toggled, m_updates, &UpdateChecker::setAutoCheckEnabled);
+
+    connect(m_updateBtn, &QPushButton::clicked, this, [this] {
+        m_updates->check(true);
+        refreshUpdateUi();
+    });
+    connect(m_installBtn, &QPushButton::clicked, this, [this] {
+        const UpdateChecker::Release release = m_updates->available();
+        const auto answer = QMessageBox::question(this, tr("Install update"),
+            tr("Install PktSwerve %1 now?\n\nPktSwerve closes, updates itself and starts again. "
+               "The connection is interrupted for a few seconds.").arg(release.version));
+        if (answer != QMessageBox::Yes)
+            return;
+        m_installer->install(release);
+        refreshUpdateUi();
+    });
+    connect(m_updates, &UpdateChecker::updateAvailable, this, [this] { refreshUpdateUi(); });
+    connect(m_updates, &UpdateChecker::upToDate, this, [this] {
+        refreshUpdateUi();
+        m_updateStatus->setText(tr("You are up to date."));
+    });
+    connect(m_updates, &UpdateChecker::checkFailed, this, [this](const QString& reason) {
+        refreshUpdateUi();
+        m_updateStatus->setText(tr("Could not check: %1").arg(reason.toHtmlEscaped()));
+    });
+    connect(m_installer, &UpdateInstaller::statusChanged, this, [this] { refreshUpdateUi(); });
+    connect(m_installer, &UpdateInstaller::failed, this, [this](const QString& reason) {
+        refreshUpdateUi();
+        m_updateStatus->setText(tr("Update failed: %1").arg(reason.toHtmlEscaped())
+            + QString(" <a href=\"%1\">%2</a>")
+                  .arg(m_updates->available().page.toString().toHtmlEscaped(), tr("Download it manually")));
+    });
+    refreshUpdateUi();
     lay->addSpacing(14);
-    lay->addWidget(makeLabel("Developed by Lurid Lane · Jadis0x", "note"));
+    lay->addWidget(makeLabel(tr("Developed by Lurid Lane · Jadis0x"), "note"));
     lay->addSpacing(14);
     lay->addWidget(makeLabel(
-        "PktSwerve is a custom packet manipulation tool designed to bypass network "
-        "restrictions and secure personal traffic.", "body"));
+        tr("PktSwerve is a custom packet manipulation tool designed to bypass network "
+           "restrictions and secure personal traffic."), "body"));
     lay->addSpacing(14);
     lay->addWidget(makeLabel(
-        "This is a private utility. The developer assumes no responsibility for network "
-        "issues, connection drops, or any misuse of this software.", "meta"));
+        tr("This is a private utility. The developer assumes no responsibility for network "
+           "issues, connection drops, or any misuse of this software."), "meta"));
     lay->addStretch();
+}
+
+
+void SettingsWindow::refreshUpdateUi()
+{
+    const bool busy = m_installer->isBusy();
+    const bool checking = m_updates->isChecking();
+    const UpdateChecker::Release& release = m_updates->available();
+    const bool installable = m_updates->hasUpdate() && release.canInstall() && UpdateInstaller::supported();
+
+    m_updateBtn->setEnabled(!busy && !checking);
+    m_installBtn->setVisible(installable);
+    m_installBtn->setEnabled(installable && !busy);
+    if (installable)
+        m_installBtn->setText(tr("Install %1").arg(release.version));
+
+    if (busy)
+        m_updateStatus->setText(m_installer->status());
+    else if (checking)
+        m_updateStatus->setText(tr("Checking..."));
+    else if (m_updates->hasUpdate())
+        m_updateStatus->setText(QString("%1 <a href=\"%2\">%3</a>")
+                                    .arg(tr("Version %1 is available.").arg(release.version.toHtmlEscaped()),
+                                         release.page.toString().toHtmlEscaped(), tr("Release page")));
+}
+
+void SettingsWindow::showAboutTab()
+{
+    m_tabs->setCurrentIndex(m_tabs->count() - 1);
 }
 
 
 void SettingsWindow::onModeChanged(int)
 {
     const auto mode = static_cast<BypassMode>(m_modeCombo->currentData().toInt());
-    m_hostListWidget->setEnabled(mode == BypassMode::BlacklistMode);
+    const bool listUsed = mode == BypassMode::BlacklistMode;
+    m_blacklist->setEnabled(listUsed);
+    m_apps->setEnabled(listUsed);
+    m_hostListHint->setVisible(!listUsed);
 }
 
 void SettingsWindow::loadToUi(const BypassConfig& cfg)
@@ -469,6 +586,7 @@ void SettingsWindow::loadToUi(const BypassConfig& cfg)
     m_dnsPresetCombo->setCurrentIndex(0);
 
     m_blacklist->setDomains(cfg.blacklist);
+    m_apps->setDomains(cfg.apps);
 }
 
 BypassConfig SettingsWindow::uiToConfig()
@@ -493,6 +611,7 @@ BypassConfig SettingsWindow::uiToConfig()
     cfg.dnsPort     = m_dnsPort->value();
 
     cfg.blacklist = m_blacklist->domains();
+    cfg.apps      = m_apps->domains();
     return cfg;
 }
 
@@ -502,12 +621,15 @@ void SettingsWindow::onApply()
 
     if (cfg.dnsServer.isEmpty()) {
         LOG_WARN0("Apply rejected: DNS server address is empty");
-        QMessageBox::warning(this, "Missing Field", "DNS server address cannot be empty.");
+        QMessageBox::warning(this, tr("Missing Field"), tr("DNS server address cannot be empty."));
         m_tabs->setCurrentIndex(2);
         return;
     }
 
     m_engine->setAutoStart(m_autoStartCheck->isChecked());
+    const QString language = m_languageCombo->currentData().toString();
+    const bool languageChanged = language != Language::saved();
+    Language::save(language);
     m_engine->setConfig(cfg);
     flushDnsCache();
 
@@ -516,6 +638,9 @@ void SettingsWindow::onApply()
         m_engine->stop();
         m_engine->start();
     }
+    if (languageChanged)
+        QMessageBox::information(this, tr("Language"),
+            tr("The language changes the next time PktSwerve starts."));
     close();
 }
 
@@ -532,7 +657,7 @@ void SettingsWindow::onDnsPresetSelected(int index)
 void SettingsWindow::onCheckConnectivity()
 {
     m_checkBtn->setEnabled(false);
-    m_dnsStatusLabel->setPlainText("Testing...");
+    m_dnsStatusLabel->setPlainText(tr("Testing..."));
 
     if (!kProbeNeedsEngineOff || !m_engine->isRunning()) {
         runDnsProbe(false);
@@ -564,9 +689,9 @@ void SettingsWindow::runDnsProbe(bool restartEngine)
 
 void SettingsWindow::onResetDefaults()
 {
-    const auto reply = QMessageBox::question(this, "Reset to Defaults",
-        "Reset all settings to their default values?\n\n"
-        "Changes take effect only after you click Apply.");
+    const auto reply = QMessageBox::question(this, tr("Reset to Defaults"),
+        tr("Reset all settings to their default values?\n\n"
+           "Changes take effect only after you click Apply."));
     if (reply == QMessageBox::Yes)
         loadToUi(BypassConfig{});
 }

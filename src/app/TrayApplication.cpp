@@ -1,5 +1,6 @@
 #include "TrayApplication.h"
 #include "core/BypassEngine.h"
+#include "core/UpdateInstaller.h"
 #include "SettingsWindow.h"
 #include "PopupWindow.h"
 #include "app/Logger.h"
@@ -12,6 +13,7 @@
 #include <QMessageBox>
 #include <QPainter>
 #include <QPixmap>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
 
@@ -46,7 +48,7 @@ TrayApplication::TrayApplication(int& argc, char** argv)
 {
     setQuitOnLastWindowClosed(false);
     setApplicationName("PktSwerve");
-    setApplicationVersion("1.0.3");
+    setApplicationVersion(PKTSWERVE_VERSION);
     setOrganizationName("PktSwerve");
 
     const QString logDir = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
@@ -75,7 +77,7 @@ bool TrayApplication::init()
 {
     if (!QSystemTrayIcon::isSystemTrayAvailable()) {
         LOG_ERR0("System tray not available - aborting init");
-        QMessageBox::critical(nullptr, "Error", "System tray is not available.");
+        QMessageBox::critical(nullptr, tr("Error"), tr("System tray is not available."));
         return false;
     }
 
@@ -87,8 +89,16 @@ bool TrayApplication::init()
         QMessageBox::warning(nullptr, "PktSwerve", reason);
     });
 
+    m_updates = new UpdateChecker(this);
+    m_installer = new UpdateInstaller(this);
+    connect(m_updates, &UpdateChecker::updateAvailable, this, &TrayApplication::onUpdateAvailable);
+
     m_tray = new QSystemTrayIcon(this);
     connect(m_tray, &QSystemTrayIcon::activated, this, &TrayApplication::onTrayActivated);
+    connect(m_tray, &QSystemTrayIcon::messageClicked, this, [this] {
+        if (m_updateBalloon)
+            showUpdate();
+    });
     buildTrayMenu();
     updateTrayIcon();
 
@@ -98,12 +108,23 @@ bool TrayApplication::init()
     m_tray->show();
     LOG_INFO0("Tray icon shown - init complete");
 
+    m_updates->startAutoCheck();
+
+#ifdef Q_OS_MACOS
+    // Connecting needs the administrator password, so a login item only puts the
+    // icon in the menu bar and leaves the connecting to the user.
+    if (arguments().contains("--background"))
+        LOG_INFO0("Started at login - waiting in the menu bar");
+    else
+        showPopup();
+#else
     if (m_engine->autoStart()) {
         LOG_INFO0("AutoStart is enabled - starting on launch");
         m_engine->start();
     } else {
         showPopup();
     }
+#endif
     return true;
 }
 
@@ -116,15 +137,17 @@ void TrayApplication::buildTrayMenu()
 {
     m_menu = new QMenu;
 
-    m_statusAction = m_menu->addAction("PktSwerve - Ready");
+    m_statusAction = m_menu->addAction(tr("PktSwerve - Ready"));
     m_statusAction->setEnabled(false);
     m_menu->addSeparator();
 
-    m_toggleAction = m_menu->addAction("Start", this, &TrayApplication::onToggleBypass);
+    m_toggleAction = m_menu->addAction(tr("Start"), this, &TrayApplication::onToggleBypass);
     m_menu->addSeparator();
-    m_menu->addAction("Settings", this, &TrayApplication::onOpenSettings);
+    m_menu->addAction(tr("Settings"), this, &TrayApplication::onOpenSettings);
+    m_updateAction = m_menu->addAction(tr("Update available"), this, &TrayApplication::showUpdate);
+    m_updateAction->setVisible(false);
     m_menu->addSeparator();
-    m_menu->addAction("Quit", qApp, &QCoreApplication::quit);
+    m_menu->addAction(tr("Quit"), qApp, &QCoreApplication::quit);
 
 #ifndef Q_OS_MACOS
     // On macOS a tray menu swallows the left click, so it is shown on right click instead.
@@ -167,7 +190,7 @@ void TrayApplication::onToggleBypass()
 void TrayApplication::onOpenSettings()
 {
     if (!m_settingsWindow) {
-        m_settingsWindow = new SettingsWindow(m_engine);
+        m_settingsWindow = new SettingsWindow(m_engine, m_updates, m_installer);
         m_settingsWindow->setAttribute(Qt::WA_DeleteOnClose);
         connect(m_settingsWindow, &QObject::destroyed, this, [this] { m_settingsWindow = nullptr; });
     }
@@ -178,25 +201,51 @@ void TrayApplication::onOpenSettings()
 
 void TrayApplication::onEngineStarted()
 {
-    m_statusAction->setText("PktSwerve - Active");
-    m_toggleAction->setText("Stop");
+    m_statusAction->setText(tr("PktSwerve - Active"));
+    m_toggleAction->setText(tr("Stop"));
     updateTrayIcon();
-    m_tray->showMessage("PktSwerve", "Bypass active.", QSystemTrayIcon::Information, 1500);
+    m_updateBalloon = false;
+    m_tray->showMessage("PktSwerve", tr("Connected."), QSystemTrayIcon::Information, 1500);
 }
 
 void TrayApplication::onEngineStopped()
 {
-    m_statusAction->setText("PktSwerve - Stopped");
-    m_toggleAction->setText("Start");
+    m_statusAction->setText(tr("PktSwerve - Stopped"));
+    m_toggleAction->setText(tr("Start"));
     updateTrayIcon();
 }
 
 void TrayApplication::onEngineError(const QString& error)
 {
-    LOG_ERROR("Engine error reported to tray: %1", error);
-    m_statusAction->setText("PktSwerve - Error");
+    LOG_ERR0("Engine error reported to tray (details are logged where it occurred)");
+    m_statusAction->setText(tr("PktSwerve - Error"));
     updateTrayIcon();
-    m_tray->showMessage("PktSwerve - Error", error, QSystemTrayIcon::Critical, 4000);
+    m_updateBalloon = false;
+    m_tray->showMessage(tr("PktSwerve - Error"), error, QSystemTrayIcon::Critical, 4000);
+}
+
+void TrayApplication::onUpdateAvailable(const UpdateChecker::Release& release, bool userInitiated)
+{
+    const QString& version = release.version;
+    m_updateAction->setText(tr("Update available: %1").arg(version));
+    m_updateAction->setVisible(true);
+
+    // Background checks announce each version once; a manual check already
+    // shows its result in the Settings window.
+    QSettings settings;
+    if (userInitiated || settings.value("updates/notifiedVersion").toString() == version)
+        return;
+    settings.setValue("updates/notifiedVersion", version);
+    m_updateBalloon = true;
+    m_tray->showMessage(tr("PktSwerve update available"),
+                        tr("Version %1 is out. Click to see it in Settings.").arg(version),
+                        QSystemTrayIcon::Information, 8000);
+}
+
+void TrayApplication::showUpdate()
+{
+    onOpenSettings();
+    m_settingsWindow->showAboutTab();
 }
 
 void TrayApplication::updateTrayIcon()
@@ -207,5 +256,5 @@ void TrayApplication::updateTrayIcon()
 #else
     m_tray->setIcon(QIcon(running ? ":/icons/active.png" : ":/icons/inactive.png"));
 #endif
-    m_tray->setToolTip(running ? "PktSwerve - Active" : "PktSwerve - Inactive");
+    m_tray->setToolTip(running ? tr("PktSwerve - Active") : tr("PktSwerve - Inactive"));
 }

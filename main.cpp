@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QIcon>
 #include "app/TrayApplication.h"
+#include "app/Language.h"
 #include "app/Logger.h"
 #include "app/Theme.h"
 
@@ -74,6 +75,7 @@ int main(int argc, char* argv[]) {
 
     TrayApplication app(argc, argv);
     Theme::apply(app);
+    Language::install();
 
     const QIcon appIcon(":/icons/app.ico");
     if (!appIcon.isNull())

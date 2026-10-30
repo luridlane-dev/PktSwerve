@@ -1,0 +1,59 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  workflow_call:   # release.yml builds the tagged release through this
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.11.*'
+          arch: win64_msvc2022_64
+          cache: true
+
+      # WinDivert is not stored in the repository (vendor/windivert is ignored).
+      - name: Fetch WinDivert
+        shell: pwsh
+        run: |
+          $version = '2.2.2'
+          Invoke-WebRequest "https://github.com/basil00/WinDivert/releases/download/v$version/WinDivert-$version-A.zip" -OutFile windivert.zip
+          Expand-Archive windivert.zip -DestinationPath windivert-src
+          $src = Get-ChildItem windivert-src -Directory | Select-Object -First 1
+          New-Item -ItemType Directory -Force vendor/windivert/include, vendor/windivert/lib | Out-Null
+          Copy-Item "$($src.FullName)/include/windivert.h" vendor/windivert/include/
+          Copy-Item "$($src.FullName)/x64/WinDivert.lib" vendor/windivert/lib/
+          Copy-Item "$($src.FullName)/x64/WinDivert.dll", "$($src.FullName)/x64/WinDivert64.sys" vendor/windivert/
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Assemble the release folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/PktSwerve | Out-Null
+          Copy-Item build/PktSwerve.exe dist/PktSwerve/
+          Copy-Item vendor/windivert/WinDivert.dll, vendor/windivert/WinDivert64.sys dist/PktSwerve/
+          windeployqt --release --no-translations --no-opengl-sw --no-system-d3d-compiler dist/PktSwerve/PktSwerve.exe
+          Compress-Archive -Path dist/PktSwerve -DestinationPath PktSwerve-win64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PktSwerve-Windows
+          path: PktSwerve-win64.zip

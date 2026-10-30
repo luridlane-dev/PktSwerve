@@ -2,6 +2,7 @@ name: macOS build
 
 on:
   workflow_dispatch:
+  workflow_call:   # release.yml builds the tagged release through this
   push:
     branches: [main]
     paths-ignore: ['**.md']

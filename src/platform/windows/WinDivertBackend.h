@@ -24,6 +24,7 @@
 #include <QThread>
 #include <QMap>
 #include "platform/IPlatformBackend.h"
+#include "ProcessResolver.h"
 
 
 struct DnsState {
@@ -121,7 +122,11 @@ private:
         HANDLE h, uint8_t* packet, WINDIVERT_ADDRESS* addr,
         WINDIVERT_IPHDR* ip4, WINDIVERT_IPV6HDR* ip6);
 
+    // Selected Sites & Apps mode: does this outbound connection belong to a listed app?
+    bool fromSelectedApp(const WINDIVERT_IPV6HDR* ip6, const WINDIVERT_TCPHDR* tcp, QString* appName);
+
     BypassConfig        m_config;
+    ProcessResolver     m_procs;
     std::atomic<bool>   m_stopRequested { false };
     std::atomic<HANDLE> m_handle        { nullptr };
 

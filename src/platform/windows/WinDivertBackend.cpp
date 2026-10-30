@@ -1,6 +1,7 @@
 #ifdef PLATFORM_WINDOWS
 #include "WinDivertBackend.h"
 #include "core/PacketUtils.h"
+#include "core/AppMatcher.h"
 #include "app/Logger.h"
 #include <shellapi.h>
 #include <QHostAddress>
@@ -224,6 +225,18 @@ void WinDivertWorker::closeHandle()
     }
 }
 
+bool WinDivertWorker::fromSelectedApp(const WINDIVERT_IPV6HDR* ip6, const WINDIVERT_TCPHDR* tcp,
+                                      QString* appName)
+{
+    // Outbound packet: the source is this machine's end of the connection.
+    ProcessResolver::Owner owner;
+    if (!m_procs.tcpOwner(ip6 != nullptr, ntohs(tcp->SrcPort), ntohs(tcp->DstPort), owner))
+        return false;
+    if (appName)
+        *appName = owner.name;
+    return AppMatcher::anyMatches(m_config.apps, owner.name, owner.path);
+}
+
 static inline quint64 makeDnsStateKey(quint16 clientPort,
                                       quint16 transactionId,
                                       bool isIPv6)
@@ -334,7 +347,7 @@ void WinDivertWorker::run()
 
     if (m_handle == INVALID_HANDLE_VALUE) {
         DWORD err = GetLastError();
-        QString msg = QString("WinDivert open failed, error code: %1").arg(err);
+        QString msg = tr("WinDivert open failed, error code: %1").arg(err);
         LOG_ERROR("WinDivertOpen failed | error=%1 | filter=%2", err, filterStr);
         emit errorOccurred(msg);
         emit finished();
@@ -477,9 +490,12 @@ void WinDivertWorker::run()
                 const QString directSni = (!hasPendingTls && isTLSHello)
                                          ? extractSNI(payload, pLen) : QString();
                 if (!directSni.isEmpty()) {
-                    const bool bypass = shouldBypass(directSni, m_config);
-                    LOG_INFO("TLS ClientHello | SNI=%1 | bypass=%2 | pLen=%3 | ipv6=%4",
-                             directSni, bypass ? "yes" : "no", pLen, ip6 ? "yes" : "no");
+                    QString app;
+                    const bool bypass = matchesSiteOrApp(shouldBypass(directSni, m_config), m_config,
+                                                         [&] { return fromSelectedApp(ip6, tcp, &app); });
+                    LOG_INFO("TLS ClientHello | SNI=%1 | bypass=%2 | pLen=%3 | ipv6=%4 | app=%5",
+                             directSni, bypass ? "yes" : "no", pLen, ip6 ? "yes" : "no",
+                             app.isEmpty() ? "-" : app);
                     if (bypass) {
                         ++bypassCount;
                         if (m_config.fakePackets)
@@ -509,7 +525,9 @@ void WinDivertWorker::run()
                         const QString sni = extractSNI(
                             reinterpret_cast<const uint8_t*>(assembled.constData()),
                             static_cast<uint32_t>(assembled.size()));
-                        const bool bypass = !sni.isEmpty() && shouldBypass(sni, m_config);
+                        const bool bypass = matchesSiteOrApp(!sni.isEmpty() && shouldBypass(sni, m_config),
+                                                             m_config,
+                                                             [&] { return fromSelectedApp(ip6, tcp, nullptr); });
                         LOG_INFO("TLS ClientHello reassembled | SNI=%1 | bypass=%2 | totalLen=%3 | ipv6=%4",
                                  sni.isEmpty() ? "(none)" : sni,
                                  bypass ? "yes" : "no", assembled.size(), ip6 ? "yes" : "no");
@@ -521,11 +539,14 @@ void WinDivertWorker::run()
 
             } else if (isHttpRequest && m_config.fragmentHttpRequests) {
                 QString host   = extractHttpHost(payload, pLen);
-                bool    bypass = shouldBypass(host, m_config);
+                QString app;
+                bool    bypass = matchesSiteOrApp(shouldBypass(host, m_config), m_config,
+                                                  [&] { return fromSelectedApp(ip6, tcp, &app); });
 
-                LOG_INFO("HTTP request | Host=%1 | bypass=%2 | pLen=%3 | ipv6=%4",
+                LOG_INFO("HTTP request | Host=%1 | bypass=%2 | pLen=%3 | ipv6=%4 | app=%5",
                          host.isEmpty() ? "(none)" : host,
-                         bypass ? "yes" : "no", pLen, ip6 ? "yes" : "no");
+                         bypass ? "yes" : "no", pLen, ip6 ? "yes" : "no",
+                         app.isEmpty() ? "-" : app);
 
                 if (bypass) {
                     ++bypassCount;
@@ -550,7 +571,7 @@ void WinDivertWorker::run()
 
             if (addr.Outbound) {
                 QString queryDomain = extractDnsQuery(payload, pLen);
-                bool    bypass      = shouldBypass(queryDomain, m_config);
+                bool    bypass      = dnsRedirectApplies(queryDomain, m_config);
                 quint16 transactionId = 0;
 
                 if (bypass && extractDnsTransactionId(payload, pLen, transactionId) && (ip4 || ip6)) {

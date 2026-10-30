@@ -375,6 +375,12 @@ inline bool extractDnsTransactionId(const uint8_t* payload, uint32_t payloadLen,
     return true;
 }
 
+// In Selected Sites & Apps mode a connection also counts when it comes from a listed app.
+inline bool appsApply(const BypassConfig& config)
+{
+    return config.mode == BypassMode::BlacklistMode && !config.apps.isEmpty();
+}
+
 inline bool shouldBypass(const QString& host, const BypassConfig& config)
 {
     switch (config.mode) {
@@ -390,4 +396,36 @@ inline bool shouldBypass(const QString& host, const BypassConfig& config)
         return matchesHostList(host, config.whitelist);
     }
     return false;
+}
+
+// The one rule for a connection: its site matched, or it comes from a listed app.
+// `fromSelectedApp` is only called when the site alone does not decide, because
+// finding a connection's program costs more than comparing a name.
+template <typename AppCheck>
+inline bool matchesSiteOrApp(bool siteMatched, const BypassConfig& config, AppCheck&& fromSelectedApp)
+{
+    return siteMatched || (appsApply(config) && fromSelectedApp());
+}
+
+// Names that only make sense on the local network. They must keep going to the
+// network's own DNS: a public resolver would answer NXDOMAIN.
+inline bool isLocalDnsName(const QString& domain)
+{
+    if (!domain.contains('.'))
+        return true;   // "printer", "router": names from the local search domain
+    static const QStringList suffixes = {
+        ".local", ".lan", ".home", ".internal", ".localdomain", ".home.arpa", ".intranet",
+        ".corp", ".private", ".in-addr.arpa", ".ip6.arpa"};
+    for (const QString& suffix : suffixes)
+        if (domain.endsWith(suffix, Qt::CaseInsensitive))
+            return true;
+    return false;
+}
+
+// Whether a DNS query is sent to the redirect server. A query carries no hint
+// about the app that asked, so once apps are listed every query is redirected,
+// except for local names.
+inline bool dnsRedirectApplies(const QString& domain, const BypassConfig& config)
+{
+    return shouldBypass(domain, config) || (appsApply(config) && !isLocalDnsName(domain));
 }

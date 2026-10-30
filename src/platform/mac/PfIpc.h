@@ -43,6 +43,7 @@ inline QByteArray configToJson(const BypassConfig& c)
     o["dnsPort"]              = c.dnsPort;
     o["blacklist"]            = QJsonArray::fromStringList(c.blacklist);
     o["whitelist"]            = QJsonArray::fromStringList(c.whitelist);
+    o["apps"]                 = QJsonArray::fromStringList(c.apps);
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
@@ -74,8 +75,10 @@ inline bool configFromJson(const QByteArray& data, BypassConfig& c)
 
     c.blacklist.clear();
     c.whitelist.clear();
+    c.apps.clear();
     for (const QJsonValue& v : o["blacklist"].toArray()) c.blacklist << v.toString();
     for (const QJsonValue& v : o["whitelist"].toArray()) c.whitelist << v.toString();
+    for (const QJsonValue& v : o["apps"].toArray())      c.apps << v.toString();
     return true;
 }
 

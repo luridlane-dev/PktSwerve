@@ -98,8 +98,8 @@ bool BypassEngine::start()
     if (!m_backend) {
         m_backend = createBackend();
         if (!m_backend) {
-            m_lastError = "This platform is not supported.";
-            LOG_ERROR("Backend creation failed: %1", m_lastError);
+            m_lastError = tr("This platform is not supported.");
+            LOG_ERR0("Backend creation failed: this platform is not supported");
             emit errorOccurred(m_lastError);
             return false;
         }
@@ -133,7 +133,7 @@ bool BypassEngine::start()
                 // Prompt cancelled or failed: keep this instance alive so the
                 // user can try again instead of the app silently quitting.
                 m_elevationRequested = false;
-                m_lastError = "Administrator permission was not granted.";
+                m_lastError = tr("Administrator permission was not granted.");
                 LOG_WARN0("Privilege elevation was cancelled or failed");
                 emit errorOccurred(m_lastError);
             }
@@ -222,7 +222,7 @@ void BypassEngine::loadConfig()
     QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
     if (obj.isEmpty()) {
         LOG_WARN0("Config file is empty or invalid JSON - using defaults");
-        emit configLoadFailed("Config file is corrupted, using defaults.");
+        emit configLoadFailed(tr("Config file is corrupted, using defaults."));
         return;
     }
 
@@ -249,6 +249,9 @@ void BypassEngine::loadConfig()
         m_config.blacklist << v.toString();
     for (const auto& v : obj["whitelist"].toArray())
         m_config.whitelist << v.toString();
+    m_config.apps.clear();
+    for (const auto& v : obj["apps"].toArray())
+        m_config.apps << v.toString();
 
     LOG_INFO("Config loaded | mode=%1 | dnsRedirect=%2 | dnsServer=%3:%4 "
              "| blacklist=%5 | whitelist=%6",
@@ -287,6 +290,9 @@ void BypassEngine::saveConfig()
     QJsonArray bl, wl;
     for (const auto& s : std::as_const(m_config.blacklist))  bl.append(s);
     for (const auto& s : std::as_const(m_config.whitelist))  wl.append(s);
+    QJsonArray apps;
+    for (const auto& s : std::as_const(m_config.apps))       apps.append(s);
+    obj["apps"] = apps;
     obj["blacklist"] = bl;
     obj["whitelist"] = wl;
 
@@ -373,7 +379,7 @@ void BypassEngine::setupAutoStart(bool enabled)
             "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
             "<plist version=\"1.0\">\n<dict>\n"
             "  <key>Label</key><string>com.pktswerve.app</string>\n"
-            "  <key>ProgramArguments</key><array><string>%1</string></array>\n"
+            "  <key>ProgramArguments</key><array><string>%1</string><string>--background</string></array>\n"
             "  <key>RunAtLoad</key><true/>\n"
             "</dict>\n</plist>\n").arg(exePath).toUtf8());
         f.close();

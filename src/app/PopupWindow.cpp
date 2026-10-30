@@ -5,6 +5,7 @@
 #include "core/BypassEngine.h"
 
 #include <QApplication>
+#include <QCoreApplication>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
@@ -71,10 +72,10 @@ QPixmap loadLogo(const QString& path, qreal dpr)
 QString modeName(BypassMode mode)
 {
     switch (mode) {
-    case BypassMode::Disabled:      return "Disabled";
-    case BypassMode::BlacklistMode: return "Selected Sites";
-    case BypassMode::WhitelistMode: return "Whitelist";
-    case BypassMode::GlobalMode:    return "Global";
+    case BypassMode::Disabled:      return QCoreApplication::translate("PopupWindow", "Disabled");
+    case BypassMode::BlacklistMode: return QCoreApplication::translate("PopupWindow", "Selected Sites");
+    case BypassMode::WhitelistMode: return QCoreApplication::translate("PopupWindow", "Whitelist");
+    case BypassMode::GlobalMode:    return QCoreApplication::translate("PopupWindow", "Global");
     }
     return {};
 }
@@ -265,17 +266,17 @@ void PopupWindow::buildUi()
 
     m_dnsValue  = makeLabel({}, "rowValue");
     m_modeValue = makeLabel({}, "rowValue");
-    root->addWidget(makeCard({makeValueRow("DNS", m_dnsValue), makeValueRow("Mode", m_modeValue)}));
+    root->addWidget(makeCard({makeValueRow("DNS", m_dnsValue), makeValueRow(tr("Mode"), m_modeValue)}));
     root->addSpacing(12);
 
-    QPushButton* settingsBtn = makeButtonRow("Settings", "first", false, true);
-    QPushButton* quitBtn     = makeButtonRow("Quit", "last", true, false);
+    QPushButton* settingsBtn = makeButtonRow(tr("Settings"), "first", false, true);
+    QPushButton* quitBtn     = makeButtonRow(tr("Quit"), "last", true, false);
     connect(settingsBtn, &QPushButton::clicked, this, [this] { hide(); emit settingsRequested(); });
     connect(quitBtn,     &QPushButton::clicked, this, &PopupWindow::onQuitClicked);
     root->addWidget(makeCard({settingsBtn, quitBtn}));
     root->addSpacing(14);
 
-    QLabel* credit = makeLabel("Developed by Lurid Lane", "meta");
+    QLabel* credit = makeLabel(tr("Developed by Lurid Lane"), "meta");
     credit->setAlignment(Qt::AlignHCenter);
     root->addWidget(credit);
 }
@@ -306,9 +307,9 @@ void PopupWindow::applyState()
     const bool running = m_engine->isRunning();
     const BypassConfig& cfg = m_engine->config();
 
-    setStatus(running ? "on" : "off", running ? "Connected" : "Disconnected");
+    setStatus(running ? "on" : "off", running ? tr("Connected") : tr("Disconnected"));
     m_logoLabel->setPixmap(running ? m_activeLogo : m_idleLogo);
-    m_dnsValue->setText(cfg.dnsRedirect ? cfg.dnsServer : "Off");
+    m_dnsValue->setText(cfg.dnsRedirect ? cfg.dnsServer : tr("Off"));
     m_modeValue->setText(modeName(cfg.mode));
 }
 
@@ -324,7 +325,7 @@ void PopupWindow::onToggleClicked()
 void PopupWindow::onEngineError(const QString& message)
 {
     LOG_ERROR("PopupWindow: engine error received: %1", message);
-    setStatus("error", "Error");
+    setStatus("error", tr("Error"));
 }
 
 void PopupWindow::onQuitClicked()

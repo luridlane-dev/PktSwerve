@@ -2,11 +2,14 @@
 #include <QMainWindow>
 
 class BypassEngine;
+class UpdateChecker;
+class UpdateInstaller;
 struct BypassConfig;
 
 class DomainListEditor;
 class QCheckBox;
 class QComboBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
@@ -17,7 +20,10 @@ class QWidget;
 class SettingsWindow : public QMainWindow {
     Q_OBJECT
 public:
-    explicit SettingsWindow(BypassEngine* engine, QWidget* parent = nullptr);
+    SettingsWindow(BypassEngine* engine, UpdateChecker* updates, UpdateInstaller* installer,
+                   QWidget* parent = nullptr);
+
+    void showAboutTab();
 
 private slots:
     void onApply();
@@ -33,15 +39,22 @@ private:
     void buildDnsTab(QWidget* tab);
     void buildHostlistTab(QWidget* tab);
     void buildAboutTab(QWidget* tab);
+    void refreshUpdateUi();
 
     void loadToUi(const BypassConfig& cfg);
     BypassConfig uiToConfig();
     void runDnsProbe(bool restartEngine);
 
-    BypassEngine* m_engine;
-    QTabWidget*   m_tabs = nullptr;
+    BypassEngine*  m_engine;
+    UpdateChecker* m_updates;
+    UpdateInstaller* m_installer;
+    QTabWidget*    m_tabs = nullptr;
+    QLabel*        m_updateStatus = nullptr;
+    QPushButton*   m_updateBtn = nullptr;
+    QPushButton*   m_installBtn = nullptr;
 
     QComboBox*    m_modeCombo = nullptr;
+    QComboBox*    m_languageCombo = nullptr;
     QCheckBox*    m_autoStartCheck = nullptr;
 
     QCheckBox*    m_fragHttp = nullptr;
@@ -64,5 +77,6 @@ private:
     QPushButton*  m_checkBtn = nullptr;
 
     DomainListEditor* m_blacklist = nullptr;
-    QWidget*      m_hostListWidget = nullptr;
+    DomainListEditor* m_apps = nullptr;
+    QLabel*       m_hostListHint = nullptr;
 };
