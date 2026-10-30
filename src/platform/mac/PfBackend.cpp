@@ -17,6 +17,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
@@ -689,8 +690,11 @@ struct PfctlResult {
     QString output;
 };
 
-PfctlResult runPfctl(const QStringList& args, const QByteArray& input = {})
+PfctlResult runPfctl(const QStringList& args, const QByteArray& input = {}, int timeoutMs = 10000)
 {
+    QElapsedTimer timer;
+    timer.start();
+
     QProcess p;
     p.setProcessChannelMode(QProcess::MergedChannels);
     p.start(kPfctl, args);
@@ -699,12 +703,17 @@ PfctlResult runPfctl(const QStringList& args, const QByteArray& input = {})
     if (!input.isEmpty())
         p.write(input);
     p.closeWriteChannel();
-    if (!p.waitForFinished(10000)) {
+    if (!p.waitForFinished(timeoutMs)) {
         p.kill();
+        p.waitForFinished(1000);
+        LOG_WARN("pfctl %1 timed out after %2 ms", args.join(' '), timer.elapsed());
         return {false, "pfctl timed out"};
     }
-    return {p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0,
-            QString::fromLocal8Bit(p.readAll()).trimmed()};
+    const PfctlResult result{p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0,
+                             QString::fromLocal8Bit(p.readAll()).trimmed()};
+    if (!result.ok || timer.elapsed() > 1000)
+        LOG_WARN("pfctl %1 | ok=%2 | %3 ms | %4", args.join(' '), result.ok, timer.elapsed(), result.output);
+    return result;
 }
 
 // Same idea as zapret's tpws setup: outgoing packets are routed onto lo0 and
@@ -878,11 +887,13 @@ bool PfBackend::clearPf()
         return true;   // stop() already did it; the finished handler arrives later
     m_pfActive = false;
 
+    // Short timeouts: stop() runs on the helper's main thread and must not hang.
+    constexpr int kCleanupMs = 3000;
     stopWatchdog();
-    runPfctl({"-a", m_anchor, "-F", "rules"});
-    runPfctl({"-a", m_anchor, "-F", "nat"});
+    runPfctl({"-a", m_anchor, "-F", "rules"}, {}, kCleanupMs);
+    runPfctl({"-a", m_anchor, "-F", "nat"}, {}, kCleanupMs);
     if (!m_pfToken.isEmpty()) {
-        runPfctl({"-X", m_pfToken});
+        runPfctl({"-X", m_pfToken}, {}, kCleanupMs);
         m_pfToken.clear();
     }
     return true;

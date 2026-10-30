@@ -5,6 +5,11 @@
 #include "app/Logger.h"
 #include "app/Theme.h"
 
+#ifdef PLATFORM_MACOS
+#include <cstring>
+#include "platform/mac/PfHelper.h"
+#endif
+
 #ifdef PLATFORM_WINDOWS
 #include <windows.h>
 #include <shellapi.h>
@@ -54,6 +59,11 @@ bool relaunchElevated()
 #endif
 
 int main(int argc, char* argv[]) {
+#ifdef PLATFORM_MACOS
+    // The root half of the app: PktSwerve --pf-helper <socket> <uid> <gid>
+    if (argc >= 2 && std::strcmp(argv[1], "--pf-helper") == 0)
+        return runPfHelper(argc, argv);
+#endif
 #ifdef PLATFORM_WINDOWS
     SetUnhandledExceptionFilter(crashHandler);
 

@@ -62,7 +62,7 @@ Paste this single line into Terminal. It downloads the latest build and installs
 curl -fsSL https://raw.githubusercontent.com/luridlane-dev/PktSwerve/main/packaging/macos/install.sh | bash
 ```
 
-Then click the menu bar icon and press **Start**. macOS asks for your password once to set up the network rules. To remove the app, append `-s -- --uninstall` to `bash` in the command above.
+Then click the menu bar icon and press **Start**. macOS asks for your password once per session; the app itself keeps running as your normal user, and a small root helper process sets up the network rules. If something goes wrong, the logs `pktswerve.log` and `pktswerve-helper.log` are in `~/Library/Application Support/PktSwerve/`. To remove the app, append `-s -- --uninstall` to `bash` in the command above.
 
 Prefer the disk image? Download `PktSwerve-macOS.dmg` from the [macos-latest release](https://github.com/luridlane-dev/PktSwerve/releases/tag/macos-latest), then right-click `Install PktSwerve.command` and choose Open. If macOS still blocks it, use System Settings → Privacy & Security → **Open Anyway**. The app is not notarized, so a browser-downloaded copy needs one of these steps.
 

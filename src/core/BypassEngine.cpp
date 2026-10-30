@@ -26,7 +26,7 @@ QString configPath()
 #elif defined(PLATFORM_LINUX)
 #  include "platform/linux/NFQueueBackend.h"
 #elif defined(PLATFORM_MACOS)
-#  include "platform/mac/PfBackend.h"
+#  include "platform/mac/PfRemoteBackend.h"
 #  include <sys/stat.h>
 #  include <unistd.h>
 #endif
@@ -34,10 +34,8 @@ QString configPath()
 #ifdef PLATFORM_MACOS
 namespace {
 
-// The elevated instance runs as root with HOME pointing at the real user's
-// home (see PfBackend::requestPrivilegeElevation), so this resolves to the
-// user's LaunchAgents folder. launchd refuses agents not owned by the user,
-// hence the chown helpers below.
+// Per-user login item in ~/Library/LaunchAgents. launchd refuses agents the
+// user does not own, hence the chown helpers below for a copy started as root.
 QString launchAgentPath()
 {
     return QDir::homePath() + "/Library/LaunchAgents/com.pktswerve.app.plist";
@@ -79,8 +77,8 @@ IPlatformBackend* BypassEngine::createBackend()
     LOG_INFO0("Creating NFQueueBackend");
     return new NFQueueBackend(this);
 #elif defined(PLATFORM_MACOS)
-    LOG_INFO0("Creating PfBackend");
-    return new PfBackend(this);
+    LOG_INFO0("Creating PfRemoteBackend");
+    return new PfRemoteBackend(this);
 #else
     LOG_ERR0("No backend available for this platform");
     return nullptr;

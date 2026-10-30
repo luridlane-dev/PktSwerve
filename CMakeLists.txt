@@ -54,6 +54,11 @@ elseif(APPLE)
     list(APPEND PROJECT_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfBackend.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfBackend.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfHelper.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfHelper.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfIpc.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfRemoteBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/platform/mac/PfRemoteBackend.h
     )
 elseif(UNIX)
     list(APPEND PROJECT_SOURCES
